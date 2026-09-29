@@ -198,6 +198,12 @@ msm_fbsd_probe(device_t dev)
 static void
 msm_fbsd_teardown(struct msm_fbsd_softc *sc)
 {
+	int rid;
+
+	/* Forget the interrupts added for want of ACPI entries. */
+	for (rid = MSM_FBSD_EXTRA_RID; rid < sc->next_rid; rid++)
+		bus_delete_resource(sc->dev, SYS_RES_IRQ, rid);
+	sc->next_rid = MSM_FBSD_EXTRA_RID;
 	qcom_smmu_release(sc->smmu);
 	sc->smmu = NULL;
 	qcom_gpucc_destroy(sc->gpucc);

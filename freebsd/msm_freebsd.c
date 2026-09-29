@@ -33,6 +33,7 @@
  */
 
 #include <linux/device.h>
+#include <linux/dma-mapping.h>
 #include <linux/interrupt.h>
 #include <linux/kobject.h>
 #include <linux/pci.h>
@@ -233,12 +234,19 @@ msm_fbsd_dev_create(device_t dev, const struct msm_fbsd_pdev_desc *desc)
 
 	ldev = &fdev->pdev.dev;
 	ldev->parent = &linux_root_device;
+	for (n = 0; desc->parent != NULL && n < msm_fbsd_nfdevs; n++)
+		if (strcmp(msm_fbsd_fdevs[n]->desc->name, desc->parent) == 0)
+			ldev->parent = &msm_fbsd_fdevs[n]->pdev.dev;
 	ldev->bsddev = dev;
 	spin_lock_init(&ldev->devres_lock);
 	INIT_LIST_HEAD(&ldev->devres_head);
 	INIT_LIST_HEAD(&ldev->irqents);
 	kobject_init(&ldev->kobj, &linux_dev_ktype);
 	kobject_set_name(&ldev->kobj, "%s", desc->name);
+	if (linux_dma_dev_init(ldev) != 0) {
+		kfree(fdev);
+		return (NULL);
+	}
 	return (fdev);
 }
 
@@ -261,6 +269,8 @@ msm_fbsd_linux_attach(device_t dev, const char *pep_hid,
 		;
 	while (desc-- != msm_fbsd_soc->pdevs) {
 		msm_fbsd_fdevs[msm_fbsd_nfdevs] = msm_fbsd_dev_create(dev, desc);
+		if (msm_fbsd_fdevs[msm_fbsd_nfdevs] == NULL)
+			return (-ENOMEM);
 		msm_fbsd_nfdevs++;
 		error = msm_fbsd_pdev_add(
 		    &msm_fbsd_fdevs[msm_fbsd_nfdevs - 1]->pdev);
@@ -273,13 +283,23 @@ msm_fbsd_linux_attach(device_t dev, const char *pep_hid,
 void
 msm_fbsd_linux_detach(void)
 {
+	int i;
+
 	linux_set_current(curthread);
 	while (msm_fbsd_nfdevs > 0) {
 		msm_fbsd_nfdevs--;
 		msm_fbsd_pdev_del(&msm_fbsd_fdevs[msm_fbsd_nfdevs]->pdev);
+		linux_dma_dev_uninit(&msm_fbsd_fdevs[msm_fbsd_nfdevs]->pdev.dev);
 		kfree(msm_fbsd_fdevs[msm_fbsd_nfdevs]);
 		msm_fbsd_fdevs[msm_fbsd_nfdevs] = NULL;
 	}
+	/* Interrupts Linux requested with devm_request_irq() are still set up. */
+	for (i = 0; i < MSM_FBSD_MAX_IRQS; i++)
+		if (msm_fbsd_irqs[i].handler != NULL) {
+			msm_fbsd_bus_irq_free(msm_fbsd_irqs[i].handle);
+			msm_fbsd_irqs[i].handler = NULL;
+		}
+	msm_fbsd_rpm_fini();
 	msm_fbsd_iommu_set_smmu(NULL);
 	msm_fbsd_dev = NULL;
 }

@@ -51,32 +51,46 @@
 
 static struct msm_fbsd_rpm {
 	struct device	*dev;
+	struct mutex	lock;		/* serializes this device's callbacks */
 	int		usage;
 	bool		enabled;
 	bool		active;
 } msm_fbsd_rpm[8];
 
-static DEFINE_MUTEX(msm_fbsd_rpm_lock);
+static DEFINE_MUTEX(msm_fbsd_rpm_lock);	/* protects the slots */
 
+/*
+ * Find or allocate the device's slot and return it locked.  Callbacks may
+ * call into other devices' runtime PM, so they run under the device's own
+ * lock only.
+ */
 static struct msm_fbsd_rpm *
 msm_fbsd_rpm_get(struct device *dev)
 {
-	struct msm_fbsd_rpm *free = NULL;
+	struct msm_fbsd_rpm *r, *free = NULL;
 	int i;
 
-	for (i = 0; i < nitems(msm_fbsd_rpm); i++) {
-		if (msm_fbsd_rpm[i].dev == dev)
-			return (&msm_fbsd_rpm[i]);
+	mutex_lock(&msm_fbsd_rpm_lock);
+	for (i = 0, r = NULL; i < nitems(msm_fbsd_rpm); i++) {
+		if (msm_fbsd_rpm[i].dev == dev) {
+			r = &msm_fbsd_rpm[i];
+			break;
+		}
 		if (free == NULL && msm_fbsd_rpm[i].dev == NULL)
 			free = &msm_fbsd_rpm[i];
 	}
-	if (free != NULL) {
-		free->dev = dev;
-		free->usage = 0;
-		free->enabled = false;
-		free->active = false;
+	if (r == NULL && free != NULL) {
+		r = free;
+		r->dev = dev;
+		r->usage = 0;
+		r->enabled = false;
+		r->active = false;
+		mutex_init(&r->lock);
 	}
-	return (free);
+	mutex_unlock(&msm_fbsd_rpm_lock);
+	if (r != NULL)
+		mutex_lock(&r->lock);
+	return (r);
 }
 
 static const struct dev_pm_ops *
@@ -114,21 +128,31 @@ msm_fbsd_rpm_suspend(struct device *dev, struct msm_fbsd_rpm *r)
 	r->active = false;
 }
 
+/* Forget every device; called once they are all gone. */
+void
+msm_fbsd_rpm_fini(void)
+{
+	int i;
+
+	for (i = 0; i < nitems(msm_fbsd_rpm); i++) {
+		if (msm_fbsd_rpm[i].dev == NULL)
+			continue;
+		mutex_destroy(&msm_fbsd_rpm[i].lock);
+		msm_fbsd_rpm[i].dev = NULL;
+	}
+}
+
 int
 pm_runtime_get_sync(struct device *dev)
 {
 	struct msm_fbsd_rpm *r;
 	int error;
 
-	mutex_lock(&msm_fbsd_rpm_lock);
-	r = msm_fbsd_rpm_get(dev);
-	if (r == NULL) {
-		mutex_unlock(&msm_fbsd_rpm_lock);
+	if ((r = msm_fbsd_rpm_get(dev)) == NULL)
 		return (-ENOMEM);
-	}
 	r->usage++;
 	error = r->usage == 1 ? msm_fbsd_rpm_resume(dev, r) : 0;
-	mutex_unlock(&msm_fbsd_rpm_lock);
+	mutex_unlock(&r->lock);
 	return (error);		/* the count stays up, as in Linux */
 }
 
@@ -137,11 +161,11 @@ pm_runtime_put_sync(struct device *dev)
 {
 	struct msm_fbsd_rpm *r;
 
-	mutex_lock(&msm_fbsd_rpm_lock);
-	r = msm_fbsd_rpm_get(dev);
-	if (r != NULL && r->usage > 0 && --r->usage == 0)
+	if ((r = msm_fbsd_rpm_get(dev)) == NULL)
+		return (0);
+	if (r->usage > 0 && --r->usage == 0)
 		msm_fbsd_rpm_suspend(dev, r);
-	mutex_unlock(&msm_fbsd_rpm_lock);
+	mutex_unlock(&r->lock);
 	return (0);
 }
 
@@ -151,12 +175,12 @@ pm_runtime_get_if_in_use(struct device *dev)
 	struct msm_fbsd_rpm *r;
 	int ret;
 
-	mutex_lock(&msm_fbsd_rpm_lock);
-	r = msm_fbsd_rpm_get(dev);
-	ret = r != NULL && r->active && r->usage > 0;
+	if ((r = msm_fbsd_rpm_get(dev)) == NULL)
+		return (0);
+	ret = r->active && r->usage > 0;
 	if (ret)
 		r->usage++;
-	mutex_unlock(&msm_fbsd_rpm_lock);
+	mutex_unlock(&r->lock);
 	return (ret);
 }
 
@@ -166,10 +190,10 @@ pm_runtime_active(struct device *dev)
 	struct msm_fbsd_rpm *r;
 	bool active;
 
-	mutex_lock(&msm_fbsd_rpm_lock);
-	r = msm_fbsd_rpm_get(dev);
-	active = r != NULL && r->active;
-	mutex_unlock(&msm_fbsd_rpm_lock);
+	if ((r = msm_fbsd_rpm_get(dev)) == NULL)
+		return (false);
+	active = r->active;
+	mutex_unlock(&r->lock);
 	return (active);
 }
 
@@ -178,10 +202,10 @@ pm_runtime_enable(struct device *dev)
 {
 	struct msm_fbsd_rpm *r;
 
-	mutex_lock(&msm_fbsd_rpm_lock);
-	if ((r = msm_fbsd_rpm_get(dev)) != NULL)
-		r->enabled = true;
-	mutex_unlock(&msm_fbsd_rpm_lock);
+	if ((r = msm_fbsd_rpm_get(dev)) == NULL)
+		return;
+	r->enabled = true;
+	mutex_unlock(&r->lock);
 }
 
 void
@@ -189,10 +213,10 @@ pm_runtime_disable(struct device *dev)
 {
 	struct msm_fbsd_rpm *r;
 
-	mutex_lock(&msm_fbsd_rpm_lock);
-	if ((r = msm_fbsd_rpm_get(dev)) != NULL)
-		r->enabled = false;
-	mutex_unlock(&msm_fbsd_rpm_lock);
+	if ((r = msm_fbsd_rpm_get(dev)) == NULL)
+		return;
+	r->enabled = false;
+	mutex_unlock(&r->lock);
 }
 
 bool
@@ -201,10 +225,10 @@ pm_runtime_enabled(struct device *dev)
 	struct msm_fbsd_rpm *r;
 	bool enabled;
 
-	mutex_lock(&msm_fbsd_rpm_lock);
-	r = msm_fbsd_rpm_get(dev);
-	enabled = r != NULL && r->enabled;
-	mutex_unlock(&msm_fbsd_rpm_lock);
+	if ((r = msm_fbsd_rpm_get(dev)) == NULL)
+		return (false);
+	enabled = r->enabled;
+	mutex_unlock(&r->lock);
 	return (enabled);
 }
 
@@ -213,10 +237,10 @@ pm_runtime_force_suspend(struct device *dev)
 {
 	struct msm_fbsd_rpm *r;
 
-	mutex_lock(&msm_fbsd_rpm_lock);
-	if ((r = msm_fbsd_rpm_get(dev)) != NULL)
-		msm_fbsd_rpm_suspend(dev, r);
-	mutex_unlock(&msm_fbsd_rpm_lock);
+	if ((r = msm_fbsd_rpm_get(dev)) == NULL)
+		return (0);
+	msm_fbsd_rpm_suspend(dev, r);
+	mutex_unlock(&r->lock);
 	return (0);
 }
 
@@ -226,10 +250,11 @@ pm_runtime_force_resume(struct device *dev)
 	struct msm_fbsd_rpm *r;
 	int error = 0;
 
-	mutex_lock(&msm_fbsd_rpm_lock);
-	if ((r = msm_fbsd_rpm_get(dev)) != NULL && r->usage > 0)
+	if ((r = msm_fbsd_rpm_get(dev)) == NULL)
+		return (0);
+	if (r->usage > 0)
 		error = msm_fbsd_rpm_resume(dev, r);
-	mutex_unlock(&msm_fbsd_rpm_lock);
+	mutex_unlock(&r->lock);
 	return (error);
 }
 

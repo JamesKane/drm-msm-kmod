@@ -51,6 +51,7 @@ struct msm_fbsd_opp {
 struct msm_fbsd_pdev_desc {
 	const char			*name;
 	const char			*node;	/* its device tree node */
+	const char			*parent; /* an earlier device, or NULL */
 	const struct msm_fbsd_res	*res;
 	const struct msm_fbsd_opp	*opps;
 	/* SMMU stream IDs and masks, as Linux's devicetree has them. */
@@ -78,5 +79,6 @@ device_t msm_fbsd_bsddev(void);
 /* msm_freebsd_iommu.c */
 struct qcom_smmu;
 void	msm_fbsd_iommu_set_smmu(struct qcom_smmu *sc);
+void	msm_fbsd_rpm_fini(void);
 
 #endif

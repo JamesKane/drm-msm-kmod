@@ -112,14 +112,23 @@ static const struct msm_fbsd_opp sc8280xp_gmu_opps[] = {
 };
 
 static const struct msm_fbsd_pdev_desc sc8280xp_pdevs[] = {
-	/* The headless DRM device; its component is the GPU. */
-	{ .name = "msm" },
+	/*
+	 * The headless DRM device; its component is the GPU.  It sits under
+	 * the GPU, as a display would under MDSS, so that msm_use_mmu() sees
+	 * the GPU's SMMU and buffers use it instead of a VRAM carveout.
+	 */
+	{ .name = "msm", .parent = "adreno" },
 	{ .name = "adreno", .node = "gpu", .res = sc8280xp_gpu_res,
 	  .opps = sc8280xp_gpu_opps,
 	  .sid = { 0x0, 0x1 }, .sid_mask = { 0xc00, 0xc00 }, .nsids = 2 },
 	{ .name = "gmu", .node = "gmu", .res = sc8280xp_gmu_res,
 	  .opps = sc8280xp_gmu_opps,
-	  .sid = { 0x5 }, .sid_mask = { 0x400 }, .nsids = 1 },
+	  /*
+	   * The mask is the board firmware devicetree's.  A narrower one
+	   * leaves some GMU streams unmatched, and the resulting global
+	   * SMMU fault resets the SoC.
+	   */
+	  .sid = { 0x5 }, .sid_mask = { 0xc00 }, .nsids = 1 },
 	{ .name = NULL }
 };
 
