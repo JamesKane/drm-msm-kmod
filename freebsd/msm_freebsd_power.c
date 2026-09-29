@@ -134,8 +134,10 @@ msm_fbsd_rpm_suspend(struct device *dev, struct msm_fbsd_rpm *r)
 
 	if (!r->active)
 		return;
-	if (r->enabled && ops != NULL && ops->runtime_suspend != NULL)
-		(void)ops->runtime_suspend(dev);
+	/* As on Linux, a device whose suspend fails stays active. */
+	if (r->enabled && ops != NULL && ops->runtime_suspend != NULL &&
+	    ops->runtime_suspend(dev) != 0)
+		return;
 	r->active = false;
 }
 
@@ -170,7 +172,10 @@ msm_fbsd_rpm_idle(struct device *dev, struct msm_fbsd_rpm *r, bool now)
 		return;
 	}
 	left = (long)(r->last_busy + msecs_to_jiffies(r->delay_ms) - jiffies);
-	mod_delayed_work(system_wq, &r->suspend_work, left > 0 ? left : 0);
+	if (left > 0)
+		mod_delayed_work(system_wq, &r->suspend_work, left);
+	else
+		msm_fbsd_rpm_suspend(dev, r);
 }
 
 static void
@@ -210,7 +215,8 @@ pm_runtime_get_sync(struct device *dev)
 	/* The work rechecks the count under the lock we hold. */
 	cancel_delayed_work(&r->suspend_work);
 	r->usage++;
-	error = r->usage == 1 ? msm_fbsd_rpm_resume(dev, r) : 0;
+	/* Also retries a resume that failed for an earlier get. */
+	error = msm_fbsd_rpm_resume(dev, r);
 	mutex_unlock(&r->lock);
 	return (error);		/* the count stays up, as in Linux */
 }
