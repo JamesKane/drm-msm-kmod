@@ -104,6 +104,7 @@ cmd_db_ready(void)
 #define	MDT_TYPE_MASK		(7u << 24)
 #define	MDT_TYPE_HASH		(2u << 24)
 #define	MDT_RELOCATABLE		(1u << 27)
+#define	MDT_MAX_HASH_SIZE	(1024 * 1024)
 
 static bool
 mdt_seg_loadable(const Elf32_Phdr *ph)
@@ -215,7 +216,12 @@ qcom_mdt_load(struct device *dev, const struct firmware *fw,
 		return (-EINVAL);
 	hdr_size = ph[0].p_filesz;
 	hash_size = ph[hash].p_filesz;
+	/* A hash segment is a few KB; don't trust a malformed file's size. */
+	if (hash_size > MDT_MAX_HASH_SIZE)
+		return (-EINVAL);
 	meta = kmalloc(hdr_size + hash_size, GFP_KERNEL);
+	if (meta == NULL)
+		return (-ENOMEM);
 	memcpy(meta, fw->data, hdr_size);
 	if (hdr_size + hash_size == fw->size)		/* packed after them */
 		memcpy(meta + hdr_size, fw->data + hdr_size, hash_size);
