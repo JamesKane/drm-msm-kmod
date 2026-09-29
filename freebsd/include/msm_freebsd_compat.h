@@ -155,22 +155,6 @@ SYSCTL_DECL(_hw_msm);
 	read_poll_timeout_atomic(readl, val, cond, delay_us, timeout_us, \
 	    false, addr)
 
-/* LinuxKPI's are int expressions, which overflow from 2 GB up. */
-#undef	SZ_2G
-#undef	SZ_4G
-#undef	SZ_8G
-#undef	SZ_16G
-#undef	SZ_32G
-#undef	SZ_64G
-#define	SZ_2G		0x0000000080000000ULL
-#define	SZ_4G		0x0000000100000000ULL
-#define	SZ_8G		0x0000000200000000ULL
-#define	SZ_16G		0x0000000400000000ULL
-#define	SZ_32G		0x0000000800000000ULL
-#define	SZ_64G		0x0000001000000000ULL
-#define	SZ_128G		0x0000002000000000ULL
-#define	SZ_256G		0x0000004000000000ULL
-
 #define	in_range(val, start, len)					\
 	((val) >= (start) && (val) - (start) < (len))
 
