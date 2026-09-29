@@ -548,10 +548,27 @@ msm_fbsd_try_bind(void)
 	return (error);
 }
 
+/* Forget the master and release its matches. */
+static void
+msm_fbsd_master_free(void)
+{
+	struct component_match *m = msm_fbsd_master.match;
+	int i;
+
+	for (i = 0; m != NULL && i < m->n; i++)
+		if (m->c[i].release != NULL)
+			m->c[i].release(msm_fbsd_master.master, m->c[i].data);
+	kfree(m);
+	memset(&msm_fbsd_master, 0, sizeof(msm_fbsd_master));
+}
+
+/* As in Linux, a master whose bind fails is not left registered. */
 int
 component_master_add_with_match(struct device *master,
     const struct component_master_ops *ops, struct component_match *match)
 {
+	int error;
+
 	if (IS_ERR(match))
 		return (PTR_ERR(match));
 	if (msm_fbsd_master.master != NULL)
@@ -559,37 +576,37 @@ component_master_add_with_match(struct device *master,
 	msm_fbsd_master.master = master;
 	msm_fbsd_master.ops = ops;
 	msm_fbsd_master.match = match;
-	return (msm_fbsd_try_bind());
+	error = msm_fbsd_try_bind();
+	if (error != 0)
+		msm_fbsd_master_free();
+	return (error);
 }
 
 void
 component_master_del(struct device *master,
     const struct component_master_ops *ops)
 {
-	struct component_match *m = msm_fbsd_master.match;
-	int i;
-
 	if (msm_fbsd_master.master != master)
 		return;
 	if (msm_fbsd_master.bound)
 		ops->unbind(master);
-	for (i = 0; m != NULL && i < m->n; i++)
-		if (m->c[i].release != NULL)
-			m->c[i].release(master, m->c[i].data);
-	kfree(m);
-	memset(&msm_fbsd_master, 0, sizeof(msm_fbsd_master));
+	msm_fbsd_master_free();
 }
 
+/* As in Linux, a component whose addition fails to bind is not kept. */
 int
 component_add(struct device *dev, const struct component_ops *ops)
 {
-	int j;
+	int error, j;
 
 	for (j = 0; j < nitems(msm_fbsd_components); j++) {
 		if (msm_fbsd_components[j].dev == NULL) {
 			msm_fbsd_components[j].dev = dev;
 			msm_fbsd_components[j].ops = ops;
-			return (msm_fbsd_try_bind());
+			error = msm_fbsd_try_bind();
+			if (error != 0)
+				msm_fbsd_components[j].dev = NULL;
+			return (error);
 		}
 	}
 	return (-ENOSPC);
