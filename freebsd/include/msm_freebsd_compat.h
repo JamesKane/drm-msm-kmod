@@ -255,13 +255,17 @@ drm_of_component_match_add(struct device *master,
 int	msm_fbsd_request_irq(struct device *dev, unsigned int irq,
 	    irq_handler_t handler, unsigned long flags, const char *name,
 	    void *arg);
+int	msm_fbsd_devm_request_irq(struct device *dev, unsigned int irq,
+	    irq_handler_t handler, unsigned long flags, const char *name,
+	    void *arg);
 void	msm_fbsd_free_irq(unsigned int irq, void *arg);
 void	msm_fbsd_enable_irq(unsigned int irq);
 void	msm_fbsd_disable_irq(unsigned int irq);
 #define	request_irq(irq, handler, flags, name, arg)			\
 	msm_fbsd_request_irq(NULL, (irq), (handler), (flags), (name), (arg))
 #define	devm_request_irq(dev, irq, handler, flags, name, arg)		\
-	msm_fbsd_request_irq((dev), (irq), (handler), (flags), (name), (arg))
+	msm_fbsd_devm_request_irq((dev), (irq), (handler), (flags), (name), \
+	    (arg))
 #define	free_irq(irq, arg)	msm_fbsd_free_irq((irq), (arg))
 #define	enable_irq(irq)		msm_fbsd_enable_irq(irq)
 #define	disable_irq(irq)	msm_fbsd_disable_irq(irq)

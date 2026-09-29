@@ -291,6 +291,18 @@ msm_fbsd_driver_matches(struct platform_driver *drv,
 	return (strcmp(drv->driver.name, pdev->name) == 0);
 }
 
+/*
+ * Unbind a device from its driver, and release what the driver got with
+ * devm_*() as Linux does after remove() or a failed probe().
+ */
+static void
+msm_fbsd_release_driver(struct platform_device *pdev)
+{
+	lkpi_devres_release_free_list(&pdev->dev);
+	pdev->dev.driver = NULL;
+	pdev->bound = NULL;
+}
+
 /* Probe every unbound device a registered driver matches. */
 static void
 msm_fbsd_probe_all(void)
@@ -315,8 +327,7 @@ msm_fbsd_probe_all(void)
 				device_printf(pdev->dev.bsddev, "%s: probe of "
 				    "%s failed: %d\n", pdev->name,
 				    drv->driver.name, error);
-				pdev->dev.driver = NULL;
-				pdev->bound = NULL;
+				msm_fbsd_release_driver(pdev);
 			}
 			break;
 		}
@@ -353,8 +364,7 @@ platform_driver_unregister(struct platform_driver *pdrv)
 		if (pdev != NULL && pdev->bound == pdrv) {
 			if (pdrv->remove != NULL)
 				pdrv->remove(pdev);
-			pdev->dev.driver = NULL;
-			pdev->bound = NULL;
+			msm_fbsd_release_driver(pdev);
 		}
 	}
 	mutex_lock(&msm_fbsd_lock);
@@ -392,10 +402,11 @@ msm_fbsd_pdev_del(struct platform_device *pdev)
 {
 	int i;
 
-	if (pdev->bound != NULL && pdev->bound->remove != NULL)
-		pdev->bound->remove(pdev);
-	pdev->bound = NULL;
-	pdev->dev.driver = NULL;
+	if (pdev->bound != NULL) {
+		if (pdev->bound->remove != NULL)
+			pdev->bound->remove(pdev);
+		msm_fbsd_release_driver(pdev);
+	}
 	if (pdev->of_node != NULL)
 		pdev->of_node->pdev = NULL;
 	mutex_lock(&msm_fbsd_lock);
@@ -457,13 +468,13 @@ platform_get_irq_byname(struct platform_device *pdev, const char *name)
 }
 
 void __iomem *
-devm_ioremap_resource(struct device *dev __unused, const struct resource *res)
+devm_ioremap_resource(struct device *dev, const struct resource *res)
 {
 	void __iomem *p;
 
 	if (res == NULL)
 		return (IOMEM_ERR_PTR(-EINVAL));
-	p = ioremap(res->start, resource_size(res));
+	p = devm_ioremap(dev, res->start, resource_size(res));
 	return (p != NULL ? p : IOMEM_ERR_PTR(-ENOMEM));
 }
 
@@ -626,6 +637,18 @@ component_del(struct device *dev, const struct component_ops *ops __unused)
 			msm_fbsd_components[j].dev = NULL;
 }
 
+/*
+ * As in Linux, what a component gets with devm_*() while it is bound is
+ * released when it is unbound, not when its device goes away.
+ */
+static void
+msm_fbsd_component_unbind(struct component_match *m, int i,
+    struct device *master, void *data)
+{
+	m->c[i].ops->unbind(m->c[i].dev, master, data);
+	devres_release_group(m->c[i].dev, &m->c[i]);
+}
+
 int
 component_bind_all(struct device *master, void *data)
 {
@@ -633,12 +656,18 @@ component_bind_all(struct device *master, void *data)
 	int i, error;
 
 	for (i = 0; i < m->n; i++) {
-		error = m->c[i].ops->bind(m->c[i].dev, master, data);
+		if (devres_open_group(m->c[i].dev, &m->c[i], GFP_KERNEL) ==
+		    NULL)
+			error = -ENOMEM;
+		else if ((error = m->c[i].ops->bind(m->c[i].dev, master,
+		    data)) != 0)
+			devres_release_group(m->c[i].dev, &m->c[i]);
 		if (error != 0) {
 			while (i-- > 0)
-				m->c[i].ops->unbind(m->c[i].dev, master, data);
+				msm_fbsd_component_unbind(m, i, master, data);
 			return (error);
 		}
+		devres_close_group(m->c[i].dev, &m->c[i]);
 	}
 	return (0);
 }
@@ -651,7 +680,7 @@ component_unbind_all(struct device *master, void *data)
 
 	for (i = m->n; i-- > 0;)
 		if (m->c[i].dev != NULL)
-			m->c[i].ops->unbind(m->c[i].dev, master, data);
+			msm_fbsd_component_unbind(m, i, master, data);
 }
 
 int

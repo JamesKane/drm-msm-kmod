@@ -156,6 +156,41 @@ msm_fbsd_request_irq(struct device *dev __unused, unsigned int irqno,
 	return (0);
 }
 
+struct msm_fbsd_devm_irq {
+	unsigned int	irq;
+	void		*arg;
+};
+
+static void
+msm_fbsd_devm_irq_release(struct device *dev __unused, void *res)
+{
+	struct msm_fbsd_devm_irq *dr = res;
+
+	msm_fbsd_free_irq(dr->irq, dr->arg);
+}
+
+/* request_irq() whose interrupt is freed with the device's devres. */
+int
+msm_fbsd_devm_request_irq(struct device *dev, unsigned int irqno,
+    irq_handler_t handler, unsigned long flags, const char *name, void *arg)
+{
+	struct msm_fbsd_devm_irq *dr;
+	int error;
+
+	dr = devres_alloc(msm_fbsd_devm_irq_release, sizeof(*dr), GFP_KERNEL);
+	if (dr == NULL)
+		return (-ENOMEM);
+	error = msm_fbsd_request_irq(dev, irqno, handler, flags, name, arg);
+	if (error != 0) {
+		devres_free(dr);
+		return (error);
+	}
+	dr->irq = irqno;
+	dr->arg = arg;
+	devres_add(dev, dr);
+	return (0);
+}
+
 static struct msm_fbsd_irq *
 msm_fbsd_irq_find(unsigned int irqno, void *arg)
 {
@@ -293,7 +328,7 @@ msm_fbsd_linux_detach(void)
 		kfree(msm_fbsd_fdevs[msm_fbsd_nfdevs]);
 		msm_fbsd_fdevs[msm_fbsd_nfdevs] = NULL;
 	}
-	/* Interrupts Linux requested with devm_request_irq() are still set up. */
+	/* Interrupts requested with request_irq() but never freed. */
 	for (i = 0; i < MSM_FBSD_MAX_IRQS; i++)
 		if (msm_fbsd_irqs[i].handler != NULL) {
 			msm_fbsd_bus_irq_free(msm_fbsd_irqs[i].handle);
