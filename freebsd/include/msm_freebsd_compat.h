@@ -48,27 +48,8 @@
 struct device;
 struct notifier_block;
 
-/* hrtimer: absolute expiry, and clocks and modes that are not constants. */
-#define	HRTIMER_MODE_ABS	0x10
-#undef	hrtimer_init
-#define	hrtimer_init(timer, clock, mode)	linux_hrtimer_init(timer)
-#undef	hrtimer_start
-#define	hrtimer_start(timer, time, mode)				\
-	linux_hrtimer_start((timer), (mode) == HRTIMER_MODE_ABS ?	\
-	    ktime_sub((time), ktime_get()) : (time))
-
 #define	IRQF_TRIGGER_RISING	0x00000001
 #define	IRQF_TRIGGER_HIGH	0x00000004
-
-#define	__phys_to_pfn(pa)	((unsigned long)((pa) >> PAGE_SHIFT))
-
-#define	CAP_SYS_RAWIO		17
-
-#ifndef __GFP_DIRECT_RECLAIM
-#define	__GFP_DIRECT_RECLAIM	__GFP_WAIT
-#endif
-
-#define	LOCK_STATE_NOT_HELD	0
 
 /* Fault injection: never inject. */
 struct fault_attr {
@@ -82,45 +63,6 @@ struct fault_attr {
 /* vmap purge notifiers: FreeBSD's KVA is not purged lazily. */
 #define	register_vmap_purge_notifier(nb)	((void)(nb), 0)
 #define	unregister_vmap_purge_notifier(nb)	((void)(nb), 0)
-
-static inline int
-idr_alloc_u32(struct idr *idr, void *ptr, u32 *nextid, unsigned long max,
-    gfp_t gfp)
-{
-	int id;
-
-	id = idr_alloc(idr, ptr, *nextid, max == UINT_MAX ? 0 : max + 1, gfp);
-	if (id < 0)
-		return (id);
-	*nextid = id;
-	return (0);
-}
-
-static inline char *
-kstrdup_quotable_cmdline(struct task_struct *task, gfp_t gfp)
-{
-	return (kstrdup(task->comm, gfp));
-}
-
-static inline unsigned long long
-memparse(const char *s, char **end)
-{
-	unsigned long long v;
-
-	v = strtouq(s, end, 0);
-	switch (**end) {
-	case 'g': case 'G':
-		v <<= 10;
-		/* FALLTHROUGH */
-	case 'm': case 'M':
-		v <<= 10;
-		/* FALLTHROUGH */
-	case 'k': case 'K':
-		v <<= 10;
-		(*end)++;
-	}
-	return (v);
-}
 
 /* PM QoS: no frequency constraints (there is no devfreq). */
 #define	DEV_PM_QOS_MIN_FREQUENCY	1
@@ -149,15 +91,6 @@ void __iomem	*devm_ioremap_resource(struct device *dev,
 /* msm's module parameters live under hw.msm (declared in msm_freebsd_bus.c). */
 SYSCTL_DECL(_hw_msm);
 
-#define	readl_poll_timeout(addr, val, cond, sleep_us, timeout_us)	\
-	read_poll_timeout(readl, val, cond, sleep_us, timeout_us, false, addr)
-#define	readl_poll_timeout_atomic(addr, val, cond, delay_us, timeout_us) \
-	read_poll_timeout_atomic(readl, val, cond, delay_us, timeout_us, \
-	    false, addr)
-
-#define	in_range(val, start, len)					\
-	((val) >= (start) && (val) - (start) < (len))
-
 #define	IRQF_NO_AUTOEN		0x00080000
 
 /* Device links: the glue powers the GMU and GPU in the right order. */
@@ -180,16 +113,6 @@ device_link_add(struct device *consumer __unused,
 #define	nvmem_cell_read_variable_le_u32(dev, name, val)			\
 	((void)(dev), (void)(name), (void)(val), -ENOENT)
 
-#define	SYSTEM_SLEEP_PM_OPS(suspend_fn, resume_fn)			\
-	.suspend = (suspend_fn), .resume = (resume_fn),
-#define	RUNTIME_PM_OPS(suspend_fn, resume_fn, idle_fn)			\
-	.runtime_suspend = (suspend_fn), .runtime_resume = (resume_fn),	\
-	.runtime_idle = (idle_fn),
-
-/* Platform data, which LinuxKPI's struct device has no field for. */
-void	*dev_get_platdata(const struct device *dev);
-void	msm_freebsd_set_platdata(struct device *dev, void *data);
-
 
 
 /* GEM faults, as TTM does them: insert under the VM object's lock. */
@@ -208,12 +131,6 @@ vmf_insert_pfn(struct vm_area_struct *vma, unsigned long addr,
 	    vma->vm_page_prot);
 	VM_OBJECT_WUNLOCK(vma->vm_obj);
 	return (ret);
-}
-
-static inline vm_fault_t
-vmf_error(int err)
-{
-	return (err == -ENOMEM ? VM_FAULT_OOM : VM_FAULT_SIGBUS);
 }
 
 /* Component matching by device tree node (drm_of.h in Linux). */
@@ -260,6 +177,7 @@ bool	msm_fbsd_device_iommu_mapped(struct device *dev);
 
 #include <linux/pci.h>		/* IORESOURCE_* */
 
+/* Not in LinuxKPI, whose pci.h sees FreeBSD's struct resource. */
 static inline unsigned long
 resource_type(const struct resource *r)
 {

@@ -235,7 +235,7 @@ msm_fbsd_dev_create(device_t dev, const struct msm_fbsd_pdev_desc *desc)
 	struct msm_fbsd_dev *fdev;
 	struct device_node *np;
 	const struct msm_fbsd_res *r;
-	struct device *ldev;
+	struct device *ldev, *parent;
 	int n;
 
 	fdev = kzalloc(sizeof(*fdev), GFP_KERNEL);
@@ -245,7 +245,7 @@ msm_fbsd_dev_create(device_t dev, const struct msm_fbsd_pdev_desc *desc)
 	for (np = msm_fbsd_soc->nodes; desc->node != NULL && np->name != NULL;
 	    np++)
 		if (strcmp(np->name, desc->node) == 0)
-			fdev->pdev.of_node = np;
+			fdev->pdev.dev.of_node = np;
 	for (n = 0, r = desc->res; r != NULL && r->name != NULL &&
 	    n < nitems(fdev->res); r++, n++) {
 		fdev->res[n].name = r->name;
@@ -262,14 +262,11 @@ msm_fbsd_dev_create(device_t dev, const struct msm_fbsd_pdev_desc *desc)
 	fdev->pdev.num_resources = n;
 
 	ldev = &fdev->pdev.dev;
-	ldev->parent = &linux_root_device;
+	parent = NULL;
 	for (n = 0; desc->parent != NULL && n < msm_fbsd_nfdevs; n++)
 		if (strcmp(msm_fbsd_fdevs[n]->desc->name, desc->parent) == 0)
-			ldev->parent = &msm_fbsd_fdevs[n]->pdev.dev;
-	ldev->bsddev = dev;
-	spin_lock_init(&ldev->devres_lock);
-	INIT_LIST_HEAD(&ldev->devres_head);
-	INIT_LIST_HEAD(&ldev->irqents);
+			parent = &msm_fbsd_fdevs[n]->pdev.dev;
+	lkpi_device_init(ldev, parent, dev);
 	kobject_init(&ldev->kobj, &linux_dev_ktype);
 	kobject_set_name(&ldev->kobj, "%s", desc->name);
 	if (linux_dma_dev_init(ldev) != 0) {

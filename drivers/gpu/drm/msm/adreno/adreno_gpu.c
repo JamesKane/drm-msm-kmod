@@ -45,7 +45,7 @@ static int zap_shader_load_mdt(struct msm_gpu *gpu, const char *fwname,
 		return -EINVAL;
 	}
 
-	np = of_get_child_by_name(dev_of_node(dev), "zap-shader");
+	np = of_get_child_by_name(dev->of_node, "zap-shader");
 	if (!of_device_is_available(np)) {
 		zap_available = false;
 		return -ENODEV;
@@ -1086,7 +1086,7 @@ int adreno_gpu_init(struct drm_device *drm, struct platform_device *pdev,
 		const struct adreno_gpu_funcs *funcs, int nr_rings)
 {
 	struct device *dev = &pdev->dev;
-	struct adreno_platform_config *config = dev_get_platdata(dev);
+	struct adreno_platform_config *config = dev->platform_data;
 	struct msm_gpu_config adreno_gpu_config  = { 0 };
 	struct msm_gpu *gpu = &adreno_gpu->base;
 	const char *gpu_name;

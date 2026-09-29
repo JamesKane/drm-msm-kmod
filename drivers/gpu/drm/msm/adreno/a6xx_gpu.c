@@ -1884,7 +1884,7 @@ static void a6xx_llc_slices_init(struct platform_device *pdev,
 	 * There is a different programming path for A6xx targets with an
 	 * mmu500 attached, so detect if that is the case
 	 */
-	phandle = of_parse_phandle(dev_of_node(&pdev->dev), "iommus", 0);
+	phandle = of_parse_phandle(pdev->dev.of_node, "iommus", 0);
 	a6xx_gpu->have_mmu500 = (phandle &&
 		of_device_is_compatible(phandle, "arm,mmu-500"));
 	of_node_put(phandle);
@@ -2453,7 +2453,7 @@ struct msm_gpu *a6xx_gpu_init(struct drm_device *dev)
 {
 	struct msm_drm_private *priv = dev->dev_private;
 	struct platform_device *pdev = priv->gpu_pdev;
-	struct adreno_platform_config *config = dev_get_platdata(&pdev->dev);
+	struct adreno_platform_config *config = pdev->dev.platform_data;
 	struct device_node *node;
 	struct a6xx_gpu *a6xx_gpu;
 	struct adreno_gpu *adreno_gpu;
@@ -2474,7 +2474,7 @@ struct msm_gpu *a6xx_gpu_init(struct drm_device *dev)
 	adreno_gpu->registers = NULL;
 
 	/* Check if there is a GMU phandle and set it up */
-	node = of_parse_phandle(dev_of_node(&pdev->dev), "qcom,gmu", 0);
+	node = of_parse_phandle(pdev->dev.of_node, "qcom,gmu", 0);
 	/* FIXME: How do we gracefully handle this? */
 	BUG_ON(!node);
 

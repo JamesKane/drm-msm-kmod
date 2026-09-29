@@ -47,27 +47,6 @@ static struct platform_driver *msm_fbsd_drivers[8];
 
 /* Device tree */
 
-static struct platform_device *
-msm_fbsd_pdev_of(const struct device *dev)
-{
-	int i;
-
-	for (i = 0; i < nitems(msm_fbsd_pdevs); i++)
-		if (msm_fbsd_pdevs[i] != NULL &&
-		    &msm_fbsd_pdevs[i]->dev == dev)
-			return (msm_fbsd_pdevs[i]);
-	return (NULL);
-}
-
-struct device_node *
-dev_of_node(struct device *dev)
-{
-	struct platform_device *pdev;
-
-	pdev = msm_fbsd_pdev_of(dev);
-	return (pdev != NULL ? pdev->of_node : NULL);
-}
-
 struct device_node *
 of_node_get(struct device_node *np)
 {
@@ -258,36 +237,16 @@ of_dma_configure(struct device *dev __unused, struct device_node *np __unused,
 	return (0);
 }
 
-/* Platform data */
-
-void *
-dev_get_platdata(const struct device *dev)
-{
-	struct platform_device *pdev;
-
-	pdev = msm_fbsd_pdev_of(dev);
-	return (pdev != NULL ? pdev->platdata : NULL);
-}
-
-void
-msm_freebsd_set_platdata(struct device *dev, void *data)
-{
-	struct platform_device *pdev;
-
-	pdev = msm_fbsd_pdev_of(dev);
-	if (pdev != NULL)
-		pdev->platdata = data;
-}
-
 /* Platform devices and drivers */
 
 static bool
 msm_fbsd_driver_matches(struct platform_driver *drv,
     struct platform_device *pdev)
 {
-	if (drv->of_match_table != NULL)
-		return (pdev->of_node != NULL &&
-		    of_match_node(drv->of_match_table, pdev->of_node) != NULL);
+	if (drv->driver.of_match_table != NULL)
+		return (pdev->dev.of_node != NULL &&
+		    of_match_node(drv->driver.of_match_table,
+		    pdev->dev.of_node) != NULL);
 	return (strcmp(drv->driver.name, pdev->name) == 0);
 }
 
@@ -390,8 +349,8 @@ msm_fbsd_pdev_add(struct platform_device *pdev)
 	mutex_unlock(&msm_fbsd_lock);
 	if (i == nitems(msm_fbsd_pdevs))
 		return (ENOSPC);
-	if (pdev->of_node != NULL)
-		pdev->of_node->pdev = pdev;
+	if (pdev->dev.of_node != NULL)
+		pdev->dev.of_node->pdev = pdev;
 	msm_fbsd_probe_all();
 	return (0);
 }
@@ -406,8 +365,8 @@ msm_fbsd_pdev_del(struct platform_device *pdev)
 			pdev->bound->remove(pdev);
 		msm_fbsd_release_driver(pdev);
 	}
-	if (pdev->of_node != NULL)
-		pdev->of_node->pdev = NULL;
+	if (pdev->dev.of_node != NULL)
+		pdev->dev.of_node->pdev = NULL;
 	mutex_lock(&msm_fbsd_lock);
 	for (i = 0; i < nitems(msm_fbsd_pdevs); i++)
 		if (msm_fbsd_pdevs[i] == pdev)

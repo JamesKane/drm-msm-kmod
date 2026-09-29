@@ -71,7 +71,6 @@ struct of_device_id {
 };
 #endif
 
-struct device_node *dev_of_node(struct device *dev);
 void	of_node_put(struct device_node *np);
 struct device_node *of_node_get(struct device_node *np);
 bool	of_device_is_compatible(const struct device_node *np,
