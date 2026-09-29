@@ -45,9 +45,11 @@ SRCS+=	opt_acpi.h \
 .include "${DRMKMOD}/linuxkpi_version.mk"
 .include "${DRMKMOD}/compiler_flags.mk"
 
+CFLAGS+= -I${.CURDIR:H}/freebsd/include
 CFLAGS+= -I${.CURDIR:H}/include
 CFLAGS+= -I${.CURDIR:H}/include/uapi
 CFLAGS+= -I${MSMDIR}
+CFLAGS+= -I${MSMDIR}/generated
 CFLAGS+= -I${DRMKMOD}/linuxkpi/gplv2/include
 CFLAGS+= -I${DRMKMOD}/linuxkpi/bsd/include
 CFLAGS+= -I${SYSDIR}/compat/linuxkpi/common/include
@@ -55,11 +57,12 @@ CFLAGS+= -I${SYSDIR}/compat/linuxkpi/dummy/include
 CFLAGS+= -I${DRMKMOD}/include
 CFLAGS+= -I${DRMKMOD}/include/drm
 CFLAGS+= -I${DRMKMOD}/include/uapi
+CFLAGS+= -I${DRMKMOD}/include/uapi/drm
 CFLAGS+= -I${DRMKMOD}/drivers/gpu
 
 CFLAGS+= '-DKBUILD_MODNAME="${KMOD}"'
-CFLAGS+= '-DLINUXKPI_PARAM_PREFIX=msm_'
+CFLAGS+= '-DLINUXKPI_PARAM_PREFIX=msm_' -DDRM_SYSCTL_PARAM_PREFIX=_${KMOD}
 CFLAGS+= ${KCONFIG:C/(.*)/-DCONFIG_\1/}
-CFLAGS+= -DCONFIG_DRM_MSM
+CFLAGS+= -DCONFIG_DRM_MSM -DCONFIG_QCOM_COMMAND_DB -DCONFIG_QCOM_MDT_LOADER
 
 CWARNFLAGS+=	-Wno-format -Wno-gnu-pointer-arith -Wno-cast-qual
