@@ -88,12 +88,8 @@ msm_fbsd_rpm_get(struct device *dev)
 	}
 	if (r == NULL && free != NULL) {
 		r = free;
+		memset(r, 0, sizeof(*r));
 		r->dev = dev;
-		r->usage = 0;
-		r->enabled = false;
-		r->active = false;
-		r->autosuspend = false;
-		r->delay_ms = 0;
 		r->last_busy = jiffies;
 		mutex_init(&r->lock);
 		INIT_DELAYED_WORK(&r->suspend_work, msm_fbsd_rpm_suspend_work);
@@ -443,54 +439,23 @@ clk_get_rate(struct clk *clk __unused)
 	return (0);
 }
 
-/* OPP tables, from the SoC description. */
+/*
+ * OPP tables: the SoC description's, whose entries are the struct
+ * dev_pm_opp that Linux keeps opaque.
+ */
 
-struct dev_pm_opp {
-	const struct msm_fbsd_opp *o;
-};
-
-#define	MSM_FBSD_MAX_OPPS	16
-
-static struct msm_fbsd_opps {
-	struct device		*dev;
-	struct dev_pm_opp	opp[MSM_FBSD_MAX_OPPS];
-	int			n;
-} msm_fbsd_opps[MSM_FBSD_MAX_PDEVS];
-
-static struct msm_fbsd_opps *
-msm_fbsd_opps_of(struct device *dev)
+static const struct dev_pm_opp *
+msm_fbsd_opps(struct device *dev)
 {
-	int i;
+	const struct msm_fbsd_pdev_desc *desc = msm_fbsd_pdev_desc(dev);
 
-	for (i = 0; i < nitems(msm_fbsd_opps); i++)
-		if (msm_fbsd_opps[i].dev == dev)
-			return (&msm_fbsd_opps[i]);
-	return (NULL);
+	return (desc != NULL ? desc->opps : NULL);
 }
 
 int
 devm_pm_opp_of_add_table(struct device *dev)
 {
-	const struct msm_fbsd_pdev_desc *desc;
-	struct msm_fbsd_opps *t;
-	int i;
-
-	desc = msm_fbsd_pdev_desc(dev);
-	if (desc == NULL || desc->opps == NULL)
-		return (-ENODEV);
-	if (msm_fbsd_opps_of(dev) != NULL)
-		return (0);
-	for (i = 0; i < nitems(msm_fbsd_opps); i++)
-		if (msm_fbsd_opps[i].dev == NULL)
-			break;
-	if (i == nitems(msm_fbsd_opps))
-		return (-ENOSPC);
-	t = &msm_fbsd_opps[i];
-	t->dev = dev;
-	for (t->n = 0; t->n < MSM_FBSD_MAX_OPPS && desc->opps[t->n].hz != 0;
-	    t->n++)
-		t->opp[t->n].o = &desc->opps[t->n];
-	return (0);
+	return (msm_fbsd_opps(dev) != NULL ? 0 : -ENODEV);
 }
 
 int
@@ -524,70 +489,67 @@ dev_pm_opp_add(struct device *dev __unused, unsigned long freq __unused,
 int
 dev_pm_opp_get_opp_count(struct device *dev)
 {
-	struct msm_fbsd_opps *t = msm_fbsd_opps_of(dev);
+	const struct dev_pm_opp *o = msm_fbsd_opps(dev);
+	int n;
 
-	return (t != NULL ? t->n : -ENODEV);
+	if (o == NULL)
+		return (-ENODEV);
+	for (n = 0; o[n].hz != 0; n++)
+		;
+	return (n);
 }
 
 struct dev_pm_opp *
 dev_pm_opp_find_freq_exact(struct device *dev, unsigned long freq,
     bool available __unused)
 {
-	struct msm_fbsd_opps *t = msm_fbsd_opps_of(dev);
-	int i;
+	const struct dev_pm_opp *o = msm_fbsd_opps(dev);
 
-	for (i = 0; t != NULL && i < t->n; i++)
-		if (t->opp[i].o->hz == freq)
-			return (&t->opp[i]);
+	for (; o != NULL && o->hz != 0; o++)
+		if (o->hz == freq)
+			return (__DECONST(struct dev_pm_opp *, o));
 	return (ERR_PTR(-ERANGE));
 }
 
-/* The lowest OPP at or above *freq. */
+/* The OPP nearest *freq at or above it (ceil) or at or below it. */
+static struct dev_pm_opp *
+msm_fbsd_opp_find(struct device *dev, unsigned long *freq, bool ceil)
+{
+	const struct dev_pm_opp *o = msm_fbsd_opps(dev), *best = NULL;
+
+	for (; o != NULL && o->hz != 0; o++)
+		if ((ceil ? o->hz >= *freq : o->hz <= *freq) &&
+		    (best == NULL || (ceil ? o->hz < best->hz :
+		    o->hz > best->hz)))
+			best = o;
+	if (best == NULL)
+		return (ERR_PTR(-ERANGE));
+	*freq = best->hz;
+	return (__DECONST(struct dev_pm_opp *, best));
+}
+
 struct dev_pm_opp *
 dev_pm_opp_find_freq_ceil(struct device *dev, unsigned long *freq)
 {
-	struct msm_fbsd_opps *t = msm_fbsd_opps_of(dev);
-	struct dev_pm_opp *best = NULL;
-	int i;
-
-	for (i = 0; t != NULL && i < t->n; i++)
-		if (t->opp[i].o->hz >= *freq &&
-		    (best == NULL || t->opp[i].o->hz < best->o->hz))
-			best = &t->opp[i];
-	if (best == NULL)
-		return (ERR_PTR(-ERANGE));
-	*freq = best->o->hz;
-	return (best);
+	return (msm_fbsd_opp_find(dev, freq, true));
 }
 
-/* The highest OPP at or below *freq. */
 struct dev_pm_opp *
 dev_pm_opp_find_freq_floor(struct device *dev, unsigned long *freq)
 {
-	struct msm_fbsd_opps *t = msm_fbsd_opps_of(dev);
-	struct dev_pm_opp *best = NULL;
-	int i;
-
-	for (i = 0; t != NULL && i < t->n; i++)
-		if (t->opp[i].o->hz <= *freq &&
-		    (best == NULL || t->opp[i].o->hz > best->o->hz))
-			best = &t->opp[i];
-	if (best == NULL)
-		return (ERR_PTR(-ERANGE));
-	*freq = best->o->hz;
-	return (best);
+	return (msm_fbsd_opp_find(dev, freq, false));
 }
 
 unsigned long
 dev_pm_opp_get_freq(struct dev_pm_opp *opp)
 {
-	return (opp->o->hz);
+	return (opp->hz);
 }
 
 unsigned int
 dev_pm_opp_get_level(struct dev_pm_opp *opp)
 {
-	return (opp->o->level);
+	return (opp->level);
 }
 
 void

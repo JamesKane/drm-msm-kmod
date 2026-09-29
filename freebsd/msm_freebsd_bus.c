@@ -58,11 +58,7 @@
 SYSCTL_NODE(_hw, OID_AUTO, msm, CTLFLAG_RW | CTLFLAG_MPSAFE, 0,
     "msm DRM driver parameters");
 
-#define	MSM_FBSD_GPUCC		0x3d90000	/* in the GMU window */
-#define	MSM_FBSD_MAX_IRQS	4
 #define	MSM_FBSD_EXTRA_RID	16		/* for interrupts not in ACPI */
-
-static const char *msm_fbsd_peps[] = { "QCOM0617" };	/* SC8280XP */
 
 struct msm_fbsd_irq {
 	int		rid;
@@ -79,6 +75,8 @@ static struct msm_fbsd_softc {
 	struct qcom_gpucc	*gpucc;
 	struct qcom_smmu	*smmu;
 	int			next_rid;
+	int			soc;		/* msm_fbsd_linux_soc() index */
+	uint64_t		gpucc_pa;
 	struct msm_fbsd_irq	irqs[MSM_FBSD_MAX_IRQS];
 } *msm_fbsd_sc;
 
@@ -166,30 +164,31 @@ msm_fbsd_bus_irq_disable(int h)
 
 static char *msm_fbsd_acpi_ids[] = { "QCOM0636", NULL };
 
-static const char *
-msm_fbsd_find_soc(void)
+/* The index of the SoC whose power controller \\_SB.PEP0 is, or -1. */
+static int
+msm_fbsd_find_soc(uint64_t *gpucc_pa)
 {
 	ACPI_HANDLE pep;
+	const char *hid;
 	int i;
 
 	if (ACPI_FAILURE(AcpiGetHandle(NULL, "\\_SB.PEP0", &pep)))
-		return (NULL);
-	for (i = 0; i < nitems(msm_fbsd_peps); i++)
-		if (acpi_MatchHid(pep, msm_fbsd_peps[i]) ==
-		    ACPI_MATCHHID_HID &&
-		    msm_fbsd_linux_soc_supported(msm_fbsd_peps[i]))
-			return (msm_fbsd_peps[i]);
-	return (NULL);
+		return (-1);
+	for (i = 0; msm_fbsd_linux_soc(i, &hid, gpucc_pa); i++)
+		if (acpi_MatchHid(pep, hid) == ACPI_MATCHHID_HID)
+			return (i);
+	return (-1);
 }
 
 static int
 msm_fbsd_probe(device_t dev)
 {
+	uint64_t gpucc_pa;
 	int rv;
 
 	rv = ACPI_ID_PROBE(device_get_parent(dev), dev, msm_fbsd_acpi_ids,
 	    NULL);
-	if (rv > 0 || msm_fbsd_find_soc() == NULL)
+	if (rv > 0 || msm_fbsd_find_soc(&gpucc_pa) < 0)
 		return (ENXIO);
 	device_set_desc(dev, "Qualcomm Adreno GPU");
 	return (rv);
@@ -226,11 +225,12 @@ msm_fbsd_attach(device_t dev)
 		return (ENXIO);
 	sc->dev = dev;
 	sc->next_rid = MSM_FBSD_EXTRA_RID;
+	sc->soc = msm_fbsd_find_soc(&sc->gpucc_pa);
 
 	/* The GPU CC is inside the GMU window, which ACPI lists instead. */
 	for (rid = 0; bus_get_resource(dev, SYS_RES_MEMORY, rid, &start,
 	    &count) == 0; rid++)
-		if (MSM_FBSD_GPUCC >= start && MSM_FBSD_GPUCC < start + count)
+		if (sc->gpucc_pa >= start && sc->gpucc_pa < start + count)
 			break;
 	sc->gmu_rid = rid;
 	sc->gmu_res = bus_alloc_resource_any(dev, SYS_RES_MEMORY, &sc->gmu_rid,
@@ -240,7 +240,7 @@ msm_fbsd_attach(device_t dev)
 		return (ENXIO);
 	}
 	sc->gpucc = qcom_gpucc_create(dev, sc->gmu_res,
-	    MSM_FBSD_GPUCC - rman_get_start(sc->gmu_res));
+	    sc->gpucc_pa - rman_get_start(sc->gmu_res));
 	if (sc->gpucc == NULL) {
 		error = ENXIO;
 		goto fail;
@@ -256,7 +256,7 @@ msm_fbsd_attach(device_t dev)
 	}
 
 	msm_fbsd_sc = sc;
-	error = -msm_fbsd_linux_attach(dev, msm_fbsd_find_soc(), sc->smmu);
+	error = -msm_fbsd_linux_attach(dev, sc->soc, sc->smmu);
 	if (error != 0) {
 		msm_fbsd_linux_detach();
 		msm_fbsd_sc = NULL;

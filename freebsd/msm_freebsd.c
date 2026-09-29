@@ -44,8 +44,6 @@
 #include "msm_freebsd.h"
 #include "msm_freebsd_bus.h"
 
-#define	MSM_FBSD_MAX_IRQS	4
-
 struct msm_fbsd_dev {
 	struct platform_device		pdev;
 	const struct msm_fbsd_pdev_desc	*desc;
@@ -85,15 +83,15 @@ msm_fbsd_pdev_desc(struct device *dev)
 	return (NULL);
 }
 
+/* The i'th supported SoC's power controller HID and GPU CC address. */
 bool
-msm_fbsd_linux_soc_supported(const char *pep_hid)
+msm_fbsd_linux_soc(int i, const char **pep_hid, uint64_t *gpucc_pa)
 {
-	int i;
-
-	for (i = 0; i < nitems(msm_fbsd_socs); i++)
-		if (strcmp(msm_fbsd_socs[i]->pep_hid, pep_hid) == 0)
-			return (true);
-	return (false);
+	if (i < 0 || i >= nitems(msm_fbsd_socs))
+		return (false);
+	*pep_hid = msm_fbsd_socs[i]->pep_hid;
+	*gpucc_pa = msm_fbsd_socs[i]->gpucc_pa;
+	return (true);
 }
 
 /* Interrupts */
@@ -107,22 +105,19 @@ msm_fbsd_intr(void *arg)
 	(void)irq->handler(irq->irq, irq->arg);
 }
 
-/* The interrupt's ACPI rid in the SoC description, or -1. */
-static int
-msm_fbsd_irq_rid(unsigned int irqno, bool *found)
+/* The interrupt's entry in the SoC description, or NULL. */
+static const struct msm_fbsd_res *
+msm_fbsd_irq_res(unsigned int irqno)
 {
 	const struct msm_fbsd_res *r;
 	int i;
 
-	*found = false;
 	for (i = 0; i < msm_fbsd_nfdevs; i++)
 		for (r = msm_fbsd_fdevs[i]->desc->res; r != NULL &&
 		    r->name != NULL; r++)
-			if (r->size == 0 && r->start == irqno) {
-				*found = true;
-				return (r->acpi_rid);
-			}
-	return (-1);
+			if (r->size == 0 && r->start == irqno)
+				return (r);
+	return (NULL);
 }
 
 int
@@ -130,12 +125,11 @@ msm_fbsd_request_irq(struct device *dev __unused, unsigned int irqno,
     irq_handler_t handler, unsigned long flags, const char *name __unused,
     void *arg)
 {
+	const struct msm_fbsd_res *r;
 	struct msm_fbsd_irq *irq;
-	bool found;
-	int i, rid, h;
+	int i, h;
 
-	rid = msm_fbsd_irq_rid(irqno, &found);
-	if (!found)
+	if ((r = msm_fbsd_irq_res(irqno)) == NULL)
 		return (-ENXIO);
 	for (i = 0; i < MSM_FBSD_MAX_IRQS; i++)
 		if (msm_fbsd_irqs[i].handler == NULL)
@@ -146,7 +140,7 @@ msm_fbsd_request_irq(struct device *dev __unused, unsigned int irqno,
 	irq->irq = irqno;
 	irq->handler = handler;
 	irq->arg = arg;
-	h = msm_fbsd_bus_irq_alloc(irqno, rid, msm_fbsd_intr, irq,
+	h = msm_fbsd_bus_irq_alloc(irqno, r->acpi_rid, msm_fbsd_intr, irq,
 	    (flags & IRQF_NO_AUTOEN) == 0);
 	if (h < 0) {
 		irq->handler = NULL;
@@ -286,16 +280,13 @@ msm_fbsd_dev_create(device_t dev, const struct msm_fbsd_pdev_desc *desc)
 }
 
 int
-msm_fbsd_linux_attach(device_t dev, const char *pep_hid,
-    struct qcom_smmu *smmu)
+msm_fbsd_linux_attach(device_t dev, int soc, struct qcom_smmu *smmu)
 {
 	const struct msm_fbsd_pdev_desc *desc;
-	int error, i;
+	int error;
 
 	linux_set_current(curthread);
-	for (i = 0; i < nitems(msm_fbsd_socs); i++)
-		if (strcmp(msm_fbsd_socs[i]->pep_hid, pep_hid) == 0)
-			msm_fbsd_soc = msm_fbsd_socs[i];
+	msm_fbsd_soc = msm_fbsd_socs[soc];
 	msm_fbsd_dev = dev;
 	msm_fbsd_iommu_set_smmu(smmu);
 

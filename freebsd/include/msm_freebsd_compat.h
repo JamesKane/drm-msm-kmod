@@ -146,7 +146,7 @@ void __iomem	*devm_ioremap_resource(struct device *dev,
 #include <linux/sizes.h>
 #include <sys/sysctl.h>
 
-/* msm's module parameters live under hw.msm (declared in msm_freebsd.c). */
+/* msm's module parameters live under hw.msm (declared in msm_freebsd_bus.c). */
 SYSCTL_DECL(_hw_msm);
 
 #define	readl_poll_timeout(addr, val, cond, sleep_us, timeout_us)	\
@@ -281,6 +281,11 @@ resource_type(const struct resource *r)
 {
 	return (r->flags & (IORESOURCE_MEM | IORESOURCE_IO | IORESOURCE_IRQ));
 }
+
+/* drm-kmod's linux/fb.h defines these, which the register headers use. */
+#include <linux/fb.h>
+#undef ROP_COPY
+#undef ROP_XOR
 
 #endif /* !MSM_FBSD_BUS */
 #endif

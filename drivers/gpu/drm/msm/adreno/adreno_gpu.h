@@ -14,11 +14,6 @@
 
 #include "msm_gpu.h"
 
-#ifdef __FreeBSD__
-/* drm-kmod's linux/fb.h defines these as macros. */
-#undef ROP_COPY
-#undef ROP_XOR
-#endif
 #include "adreno_common.xml.h"
 #include "adreno_pm4.xml.h"
 

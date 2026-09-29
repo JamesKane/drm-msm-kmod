@@ -37,6 +37,8 @@
 
 struct qcom_smmu;
 
+#define	MSM_FBSD_MAX_IRQS	4
+
 /* msm_freebsd_bus.c */
 int	msm_fbsd_bus_irq_alloc(int gsiv, int acpi_rid, void (*fn)(void *),
 	    void *arg, bool enable);
@@ -45,9 +47,8 @@ int	msm_fbsd_bus_irq_enable(int handle);
 void	msm_fbsd_bus_irq_disable(int handle);
 
 /* msm_freebsd.c: create and delete the platform devices. */
-int	msm_fbsd_linux_attach(device_t dev, const char *pep_hid,
-	    struct qcom_smmu *smmu);
+bool	msm_fbsd_linux_soc(int i, const char **pep_hid, uint64_t *gpucc_pa);
+int	msm_fbsd_linux_attach(device_t dev, int soc, struct qcom_smmu *smmu);
 void	msm_fbsd_linux_detach(void);
-bool	msm_fbsd_linux_soc_supported(const char *pep_hid);
 
 #endif

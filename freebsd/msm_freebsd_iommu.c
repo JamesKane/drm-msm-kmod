@@ -29,9 +29,6 @@
  * IOMMU domains for the glue's platform devices, on qcom_smmu(4): a domain
  * is a page table, and attaching a device gives it a context bank and
  * routes its streams (as the SoC description lists them) to it.
- *
- * Only one address space per domain (TTBR0): per-process page tables are
- * not provided yet, so msm uses one GPU address space for all processes.
  */
 
 #include <linux/device.h>
@@ -429,7 +426,10 @@ iommu_flush_iotlb_all(struct iommu_domain *domain)
 		(void)qcom_smmu_cb_tlb_inv(fd->cb);
 }
 
-/* TTBR1 (split address spaces) is not provided; everything is in TTBR0. */
+/*
+ * Whether the GPU's domain is split comes from the SoC description, so the
+ * quirk is only recorded.
+ */
 int
 iommu_set_pgtable_quirks(struct iommu_domain *domain, unsigned long quirks)
 {
@@ -437,7 +437,7 @@ iommu_set_pgtable_quirks(struct iommu_domain *domain, unsigned long quirks)
 	return (0);
 }
 
-/* Faults are not reported yet: context bank interrupts are not set up. */
+/* Called from the context bank's fault interrupt once a device attaches. */
 void
 iommu_set_fault_handler(struct iommu_domain *domain,
     iommu_fault_handler_t handler, void *token)

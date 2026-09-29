@@ -32,12 +32,10 @@ extern const struct adreno_gpulist a6xx_gpulist;
 extern const struct adreno_gpulist a7xx_gpulist;
 
 static const struct adreno_gpulist *gpulists[] = {
-#ifndef __FreeBSD__	/* only a6xx and later are built */
 	&a2xx_gpulist,
 	&a3xx_gpulist,
 	&a4xx_gpulist,
 	&a5xx_gpulist,
-#endif
 	&a6xx_gpulist,
 	&a7xx_gpulist,
 };

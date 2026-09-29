@@ -54,6 +54,7 @@
 #include "msm_drv.h"
 #include "msm_debugfs.h"
 #include "msm_kms.h"
+#include "adreno/adreno_gpu.h"
 
 /* Command DB */
 
@@ -191,6 +192,21 @@ mdt_load_split(void *dst, const Elf32_Phdr *ph, int n, const char *fw_name,
 	return (error);
 }
 
+/* Read segment n's contents, from the firmware file or its own. */
+static int
+mdt_read_seg(void *dst, const struct firmware *fw, const Elf32_Phdr *ph,
+    int n, const char *fw_name, struct device *dev)
+{
+	if (ph->p_filesz == 0)
+		return (0);
+	if (ph->p_offset < fw->size &&
+	    (size_t)ph->p_offset + ph->p_filesz <= fw->size) {
+		memcpy(dst, fw->data + ph->p_offset, ph->p_filesz);
+		return (0);
+	}
+	return (mdt_load_split(dst, ph, n, fw_name, dev));
+}
+
 int
 qcom_mdt_load(struct device *dev, const struct firmware *fw,
     const char *fw_name, int pas_id, void *mem_region, phys_addr_t mem_phys,
@@ -225,11 +241,8 @@ qcom_mdt_load(struct device *dev, const struct firmware *fw,
 	memcpy(meta, fw->data, hdr_size);
 	if (hdr_size + hash_size == fw->size)		/* packed after them */
 		memcpy(meta + hdr_size, fw->data + hdr_size, hash_size);
-	else if ((size_t)ph[hash].p_offset + hash_size <= fw->size)
-		memcpy(meta + hdr_size, fw->data + ph[hash].p_offset,
-		    hash_size);
 	else
-		error = mdt_load_split(meta + hdr_size, &ph[hash], hash,
+		error = mdt_read_seg(meta + hdr_size, fw, &ph[hash], hash,
 		    fw_name, dev);
 	if (error == 0)
 		error = -qcom_scm_pas_init_image(pas_id, meta,
@@ -255,13 +268,9 @@ qcom_mdt_load(struct device *dev, const struct firmware *fw,
 			return (-EINVAL);
 		if (ph[i].p_filesz > ph[i].p_memsz)
 			return (-EINVAL);
-		if (ph[i].p_filesz != 0 && ph[i].p_offset < fw->size &&
-		    (size_t)ph[i].p_offset + ph[i].p_filesz <= fw->size)
-			memcpy((u8 *)mem_region + off, fw->data +
-			    ph[i].p_offset, ph[i].p_filesz);
-		else if (ph[i].p_filesz != 0 &&
-		    (error = mdt_load_split((u8 *)mem_region + off, &ph[i], i,
-		    fw_name, dev)) != 0)
+		error = mdt_read_seg((u8 *)mem_region + off, fw, &ph[i], i,
+		    fw_name, dev);
+		if (error != 0)
 			return (error);
 		memset((u8 *)mem_region + off + ph[i].p_filesz, 0,
 		    ph[i].p_memsz - ph[i].p_filesz);
@@ -364,3 +373,7 @@ msm_fbdev_driver_fbdev_probe(struct drm_fb_helper *helper __unused,
 {
 	return (-ENODEV);
 }
+
+/* Only the a6xx and later drivers are built; the older ones know no GPUs. */
+const struct adreno_gpulist a2xx_gpulist, a3xx_gpulist, a4xx_gpulist,
+    a5xx_gpulist;

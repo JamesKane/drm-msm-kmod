@@ -392,7 +392,6 @@ msm_fbsd_pdev_add(struct platform_device *pdev)
 		return (ENOSPC);
 	if (pdev->of_node != NULL)
 		pdev->of_node->pdev = pdev;
-	pdev->registered = true;
 	msm_fbsd_probe_all();
 	return (0);
 }

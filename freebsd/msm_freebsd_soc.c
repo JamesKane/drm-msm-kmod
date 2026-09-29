@@ -93,7 +93,7 @@ static const struct msm_fbsd_res sc8280xp_gmu_res[] = {
 	{ NULL }
 };
 
-static const struct msm_fbsd_opp sc8280xp_gpu_opps[] = {
+static const struct dev_pm_opp sc8280xp_gpu_opps[] = {
 	{ 270000000, 0x040, 450000 },
 	{ 410000000, 0x080, 1555000 },
 	{ 500000000, 0x0c0, 1555000 },
@@ -105,7 +105,7 @@ static const struct msm_fbsd_opp sc8280xp_gpu_opps[] = {
 	{ 0 }
 };
 
-static const struct msm_fbsd_opp sc8280xp_gmu_opps[] = {
+static const struct dev_pm_opp sc8280xp_gmu_opps[] = {
 	{ 200000000, 0x30, 0 },
 	{ 500000000, 0x80, 0 },
 	{ 0 }
@@ -134,6 +134,7 @@ static const struct msm_fbsd_pdev_desc sc8280xp_pdevs[] = {
 
 const struct msm_fbsd_soc msm_fbsd_sc8280xp = {
 	.pep_hid = "QCOM0617",
+	.gpucc_pa = 0x3d90000,
 	.machine = &sc8280xp_machine,
 	.nodes = sc8280xp_nodes,
 	.pdevs = sc8280xp_pdevs,

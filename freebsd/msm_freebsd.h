@@ -42,7 +42,8 @@ struct msm_fbsd_res {
 	int		acpi_rid;	/* for interrupts: ACPI rid, or -1 */
 };
 
-struct msm_fbsd_opp {
+/* An OPP; Linux drivers only see pointers to it. */
+struct dev_pm_opp {
 	unsigned long	hz;
 	unsigned int	level;		/* RPMh level */
 	unsigned int	peak_kbps;
@@ -54,7 +55,7 @@ struct msm_fbsd_pdev_desc {
 	const char			*parent; /* an earlier device, or NULL */
 	bool				gpu;	/* per-process page tables */
 	const struct msm_fbsd_res	*res;
-	const struct msm_fbsd_opp	*opps;
+	const struct dev_pm_opp		*opps;	/* hz 0 terminated */
 	/* SMMU stream IDs and masks, as Linux's devicetree has them. */
 	u16				sid[2];
 	u16				sid_mask[2];
@@ -63,6 +64,7 @@ struct msm_fbsd_pdev_desc {
 
 struct msm_fbsd_soc {
 	const char			*pep_hid;	/* ACPI \_SB.PEP0 */
+	u64				gpucc_pa;	/* in the GMU window */
 	struct device_node		*machine;
 	struct device_node		*nodes;		/* NULL name terminated */
 	const struct msm_fbsd_pdev_desc	*pdevs;		/* NULL name terminated */
@@ -80,6 +82,8 @@ device_t msm_fbsd_bsddev(void);
 /* msm_freebsd_iommu.c */
 struct qcom_smmu;
 void	msm_fbsd_iommu_set_smmu(struct qcom_smmu *sc);
+
+/* msm_freebsd_power.c */
 void	msm_fbsd_rpm_fini(void);
 
 #endif

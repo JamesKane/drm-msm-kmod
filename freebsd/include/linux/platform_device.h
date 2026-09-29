@@ -49,7 +49,6 @@ struct platform_device {
 	/* FreeBSD glue */
 	void			*platdata;
 	struct platform_driver	*bound;
-	bool			registered;
 };
 
 #define	to_platform_device(d)	container_of((d), struct platform_device, dev)
