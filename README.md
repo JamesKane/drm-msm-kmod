@@ -18,11 +18,22 @@ The Linux msm DRM driver (Qualcomm Adreno GPU) for FreeBSD, built against
   - `msm_freebsd_platform.c`: platform devices and drivers, device tree
     lookups, components.
   - `msm_freebsd_power.c`: runtime PM, power domains, clocks, OPP tables.
-  - `msm_freebsd_iommu.c`: IOMMU domains on qcom_smmu.
+  - `msm_freebsd_iommu.c`: IOMMU domains on qcom_smmu: split page tables
+    and adreno_smmu_priv for per-process GPU address spaces, io-pgtable,
+    and fault reporting.
   - `msm_freebsd_misc.c`: Command DB, MDT firmware loader, GEM pages,
     stubs for the parts not built.
   - `include/`: Linux headers LinuxKPI lacks or stubs, searched first, and
     `msm_freebsd_compat.h`, included into every file.
+- `tools/`: test programs (BSD-2-Clause), built with `make` in `tools/`:
+  - `msmtest`: queries the GPU and runs a submission of CP_NOPs.
+  - `msmfault`: `hold` and `write IOVA`, run as two processes, check that
+    one process's GPU work cannot write to another's memory (the write
+    takes an SMMU fault); `hang` submits work that never completes, to
+    exercise hang detection and recovery.
+  - `egltest`: offscreen OpenGL ES through GBM and EGL; checks rendered
+    pixels.
+  - `vktest`: lists Vulkan devices and creates a device on each.
 
 Changes to the Linux sources are marked `__FreeBSD__`, or use Linux's own
 accessors (`dev_of_node()`, `dev_get_platdata()`).
@@ -33,5 +44,9 @@ overflow), `idr_alloc_u32`, platform devices, `drm_gem_get_pages()`.
 
 Build (cross or native): `make DRMKMOD=/path/to/drm-kmod SYSDIR=/usr/src/sys`.
 
-Status: work in progress; GPU only, display stays on the firmware
-framebuffer (sysfbdrm).
+Status: work in progress.  On a Radxa Dragon Q8B (SC8280XP, Adreno 690)
+the GMU boots, the zap shader loads, and Mesa's freedreno and Turnip run
+OpenGL ES 3.2 and Vulkan 1.3, with an address space per process, SMMU
+fault reporting and hang recovery.  GPU only: display stays on the firmware
+framebuffer (sysfbdrm in drm-kmod).  The CX power domain stays on while msm
+is attached.
