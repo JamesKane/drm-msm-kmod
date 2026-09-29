@@ -32,10 +32,12 @@ extern const struct adreno_gpulist a6xx_gpulist;
 extern const struct adreno_gpulist a7xx_gpulist;
 
 static const struct adreno_gpulist *gpulists[] = {
+#ifndef __FreeBSD__	/* only a6xx and later are built */
 	&a2xx_gpulist,
 	&a3xx_gpulist,
 	&a4xx_gpulist,
 	&a5xx_gpulist,
+#endif
 	&a6xx_gpulist,
 	&a7xx_gpulist,
 };
@@ -135,7 +137,7 @@ err_disable_rpm:
 
 static int find_chipid(struct device *dev, uint32_t *chipid)
 {
-	struct device_node *node = dev->of_node;
+	struct device_node *node = dev_of_node(dev);
 	const char *compat;
 	int ret;
 
@@ -191,7 +193,11 @@ static int adreno_bind(struct device *dev, struct device *master, void *data)
 	if (ret)
 		return ret;
 
+#ifdef __FreeBSD__
+	msm_freebsd_set_platdata(dev, &config);
+#else
 	dev->platform_data = &config;
+#endif
 	priv->gpu_pdev = to_platform_device(dev);
 
 	info = adreno_info(config.chip_id);
@@ -268,7 +274,7 @@ static int adreno_probe(struct platform_device *pdev)
 	if (ret)
 		return ret;
 
-	if (of_device_is_compatible(pdev->dev.of_node, "amd,imageon"))
+	if (of_device_is_compatible(dev_of_node(&pdev->dev), "amd,imageon"))
 		adreno_device_register_headless();
 
 	return 0;
@@ -395,9 +401,14 @@ static struct platform_driver adreno_driver = {
 	.probe = adreno_probe,
 	.remove = adreno_remove,
 	.shutdown = adreno_shutdown,
+#ifdef __FreeBSD__
+	.of_match_table = dt_match,
+#endif
 	.driver = {
 		.name = "adreno",
+#ifndef __FreeBSD__
 		.of_match_table = dt_match,
+#endif
 		.pm = &adreno_pm_ops,
 	},
 };

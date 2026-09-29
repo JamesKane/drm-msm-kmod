@@ -35,7 +35,11 @@ struct msm_gem_address_space {
 	/* For address spaces associated with a specific process, this
 	 * will be non-NULL:
 	 */
+#ifdef __FreeBSD__
+	pid_t pid;
+#else
 	struct pid *pid;
+#endif
 
 	/* @faults: the number of GPU hangs associated with this address space */
 	int faults;
@@ -215,10 +219,15 @@ msm_gem_assert_locked(struct drm_gem_object *obj)
 	 * Unfortunately lockdep is not aware of this detail.  So when the
 	 * refcount drops to zero, we pretend it is already locked.
 	 */
+#ifdef __FreeBSD__
+	WARN_ON_ONCE(kref_read(&obj->refcount) != 0 &&
+	    !dma_resv_is_locked(obj->resv));
+#else
 	lockdep_assert_once(
 		(kref_read(&obj->refcount) == 0) ||
 		(lockdep_is_held(&obj->resv->lock.base) != LOCK_STATE_NOT_HELD)
 	);
+#endif
 }
 
 /* imported/exported objects are not purgeable: */
@@ -274,7 +283,11 @@ struct msm_gem_submit {
 
 	int fence_id;       /* key into queue->fence_idr */
 	struct msm_gpu_submitqueue *queue;
+#ifdef __FreeBSD__
+	pid_t pid;	    /* submitting process */
+#else
 	struct pid *pid;    /* submitting process */
+#endif
 	bool bos_pinned : 1;
 	bool fault_dumped:1;/* Limit devcoredump dumping to one per submit */
 	bool in_rb : 1;     /* "sudo" mode, copy cmds into RB */

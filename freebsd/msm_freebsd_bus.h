@@ -25,24 +25,29 @@
  * SUCH DAMAGE.
  */
 
+/*
+ * The FreeBSD side of the glue (msm_freebsd_bus.c), which uses bus
+ * resources, and so cannot share a file with LinuxKPI's struct resource.
+ */
+#ifndef _MSM_FREEBSD_BUS_H_
+#define	_MSM_FREEBSD_BUS_H_
 
-/* Power domains: the GMU's CX and GX domains (msm_freebsd_power.c). */
-#ifndef _MSM_FREEBSD_LINUX_PM_DOMAIN_H_
-#define	_MSM_FREEBSD_LINUX_PM_DOMAIN_H_
+#include <sys/types.h>
+#include <sys/bus.h>
 
-#include <linux/device.h>
+struct qcom_smmu;
 
-struct device	*dev_pm_domain_attach_by_name(struct device *dev,
-		    const char *name);
-void		dev_pm_domain_detach(struct device *dev, bool power_off);
+/* msm_freebsd_bus.c */
+int	msm_fbsd_bus_irq_alloc(int gsiv, int acpi_rid, void (*fn)(void *),
+	    void *arg, bool enable);
+void	msm_fbsd_bus_irq_free(int handle);
+int	msm_fbsd_bus_irq_enable(int handle);
+void	msm_fbsd_bus_irq_disable(int handle);
 
-/* Power-off notifications from domains: none are sent. */
-#define	GENPD_NOTIFY_PRE_OFF	0
-#define	GENPD_NOTIFY_OFF	1
-#define	GENPD_NOTIFY_PRE_ON	2
-#define	GENPD_NOTIFY_ON		3
-#define	dev_pm_genpd_add_notifier(dev, nb)	((void)(dev), (void)(nb), 0)
-#define	dev_pm_genpd_remove_notifier(dev)	((void)(dev), 0)
-#define	dev_pm_genpd_synced_poweroff(dev)	((void)(dev))
+/* msm_freebsd.c: create and delete the platform devices. */
+int	msm_fbsd_linux_attach(device_t dev, const char *pep_hid,
+	    struct qcom_smmu *smmu);
+void	msm_fbsd_linux_detach(void);
+bool	msm_fbsd_linux_soc_supported(const char *pep_hid);
 
 #endif

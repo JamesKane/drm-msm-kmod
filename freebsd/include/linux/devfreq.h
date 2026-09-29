@@ -51,6 +51,7 @@ struct devfreq_dev_status {
 struct devfreq_dev_profile {
 	unsigned long	initial_freq;
 	unsigned int	polling_ms;
+	int		timer;
 	int		(*target)(struct device *, unsigned long *, u32);
 	int		(*get_dev_status)(struct device *,
 			    struct devfreq_dev_status *);

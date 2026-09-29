@@ -49,8 +49,10 @@
 static void msm_deinit_vram(struct drm_device *ddev);
 
 static char *vram = "16m";
+#ifndef __FreeBSD__
 MODULE_PARM_DESC(vram, "Configure VRAM size (for devices without IOMMU/GPUMMU)");
 module_param(vram, charp, 0);
+#endif
 
 bool dumpstate;
 MODULE_PARM_DESC(dumpstate, "Dump KMS state on errors");
@@ -147,7 +149,7 @@ static int msm_init_vram(struct drm_device *dev)
 	 *     load and do initial modeset)
 	 */
 
-	node = of_parse_phandle(dev->dev->of_node, "memory-region", 0);
+	node = of_parse_phandle(dev_of_node(dev->dev), "memory-region", 0);
 	if (node) {
 		struct resource r;
 		ret = of_address_to_resource(node, 0, &r);
@@ -277,7 +279,7 @@ static int msm_drm_init(struct device *dev, const struct drm_driver *drv)
 			goto err_msm_uninit;
 	} else {
 		/* valid only for the dummy headless case, where of_node=NULL */
-		WARN_ON(dev->of_node);
+		WARN_ON(dev_of_node(dev));
 		ddev->driver_features &= ~DRIVER_MODESET;
 		ddev->driver_features &= ~DRIVER_ATOMIC;
 	}
@@ -929,7 +931,7 @@ static const struct drm_driver msm_driver = {
 static int add_components_mdp(struct device *master_dev,
 			      struct component_match **matchptr)
 {
-	struct device_node *np = master_dev->of_node;
+	struct device_node *np = dev_of_node(master_dev);
 	struct device_node *ep_node;
 
 	for_each_endpoint_of_node(np, ep_node) {
@@ -997,11 +999,11 @@ static const char *const msm_mdp5_dpu_migration[] = {
 bool msm_disp_drv_should_bind(struct device *dev, bool dpu_driver)
 {
 	/* If it is not an MDP5 device, do not try MDP5 driver */
-	if (!of_device_is_compatible(dev->of_node, "qcom,mdp5"))
+	if (!of_device_is_compatible(dev_of_node(dev), "qcom,mdp5"))
 		return dpu_driver;
 
 	/* If it is not in the migration list, use MDP5 */
-	if (!of_device_compatible_match(dev->of_node, msm_mdp5_dpu_migration))
+	if (!of_device_compatible_match(dev_of_node(dev), msm_mdp5_dpu_migration))
 		return !dpu_driver;
 
 	return prefer_mdp5 ? !dpu_driver : dpu_driver;

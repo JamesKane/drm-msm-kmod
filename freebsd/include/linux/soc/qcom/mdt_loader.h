@@ -25,24 +25,21 @@
  * SUCH DAMAGE.
  */
 
+/*
+ * The MDT (split ELF) firmware loader, with LinuxKPI's firmware type
+ * (msm_freebsd_mdt.c).  Shadows Linux's header.
+ */
+#ifndef _MSM_FREEBSD_LINUX_SOC_QCOM_MDT_LOADER_H_
+#define	_MSM_FREEBSD_LINUX_SOC_QCOM_MDT_LOADER_H_
 
-/* Power domains: the GMU's CX and GX domains (msm_freebsd_power.c). */
-#ifndef _MSM_FREEBSD_LINUX_PM_DOMAIN_H_
-#define	_MSM_FREEBSD_LINUX_PM_DOMAIN_H_
+#include <linux/types.h>
+#include <linux/firmware.h>
 
-#include <linux/device.h>
+struct device;
 
-struct device	*dev_pm_domain_attach_by_name(struct device *dev,
-		    const char *name);
-void		dev_pm_domain_detach(struct device *dev, bool power_off);
-
-/* Power-off notifications from domains: none are sent. */
-#define	GENPD_NOTIFY_PRE_OFF	0
-#define	GENPD_NOTIFY_OFF	1
-#define	GENPD_NOTIFY_PRE_ON	2
-#define	GENPD_NOTIFY_ON		3
-#define	dev_pm_genpd_add_notifier(dev, nb)	((void)(dev), (void)(nb), 0)
-#define	dev_pm_genpd_remove_notifier(dev)	((void)(dev), 0)
-#define	dev_pm_genpd_synced_poweroff(dev)	((void)(dev))
+ssize_t	qcom_mdt_get_size(const struct firmware *fw);
+int	qcom_mdt_load(struct device *dev, const struct firmware *fw,
+	    const char *fw_name, int pas_id, void *mem_region,
+	    phys_addr_t mem_phys, size_t mem_size, phys_addr_t *reloc_base);
 
 #endif

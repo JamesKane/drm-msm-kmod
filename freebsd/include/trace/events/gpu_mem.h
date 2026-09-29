@@ -29,6 +29,7 @@
 #ifndef _MSM_FREEBSD_TRACE_EVENTS_GPU_MEM_H_
 #define	_MSM_FREEBSD_TRACE_EVENTS_GPU_MEM_H_
 
-#define	trace_gpu_mem_total(gpu, pid, size)	do { } while (0)
+#define	trace_gpu_mem_total(gpu, pid, size)				\
+	do { (void)(gpu); (void)(pid); (void)(size); } while (0)
 
 #endif

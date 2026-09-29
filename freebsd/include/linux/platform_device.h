@@ -46,6 +46,10 @@ struct platform_device {
 	struct resource		*resource;
 	struct device_node	*of_node;
 	const struct platform_device_id *id_entry;
+	/* FreeBSD glue */
+	void			*platdata;
+	struct platform_driver	*bound;
+	bool			registered;
 };
 
 #define	to_platform_device(d)	container_of((d), struct platform_device, dev)
@@ -66,6 +70,8 @@ struct platform_driver {
 	int	(*probe)(struct platform_device *);
 	void	(*remove)(struct platform_device *);
 	void	(*shutdown)(struct platform_device *);
+	/* In Linux's struct device_driver, which LinuxKPI's lacks it. */
+	const struct of_device_id *of_match_table;
 	struct device_driver driver;
 };
 

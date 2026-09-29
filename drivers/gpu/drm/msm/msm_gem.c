@@ -47,9 +47,13 @@ static void update_ctx_mem(struct drm_file *file, ssize_t size)
 	struct msm_file_private *ctx = file->driver_priv;
 	uint64_t ctx_mem = atomic64_add_return(size, &ctx->ctx_mem);
 
+#ifdef __FreeBSD__
+	trace_gpu_mem_total(0, file->pid, ctx_mem);
+#else
 	rcu_read_lock(); /* Locks file->pid! */
 	trace_gpu_mem_total(0, pid_nr(rcu_dereference(file->pid)), ctx_mem);
 	rcu_read_unlock();
+#endif
 
 }
 
@@ -857,7 +861,12 @@ void msm_gem_purge(struct drm_gem_object *obj)
 
 	msm_gem_vunmap(obj);
 
+#ifdef __FreeBSD__
+	(void)dev;
+	drm_vma_node_unmap(&obj->vma_node, obj);
+#else
 	drm_vma_node_unmap(&obj->vma_node, dev->anon_inode->i_mapping);
+#endif
 
 	put_pages(obj);
 
@@ -875,10 +884,17 @@ void msm_gem_purge(struct drm_gem_object *obj)
 	 * To do this we must instruct the shmfs to drop all of its
 	 * backing pages, *now*.
 	 */
+#ifdef __FreeBSD__
+	shmem_truncate_range(obj->filp->f_shmem, 0, (loff_t)-1);
+#else
 	shmem_truncate_range(file_inode(obj->filp), 0, (loff_t)-1);
+#endif
 
+#ifndef __FreeBSD__
+	/* On FreeBSD, truncating the shmem object drops its pages. */
 	invalidate_mapping_pages(file_inode(obj->filp)->i_mapping,
 			0, (loff_t)-1);
+#endif
 }
 
 /*
@@ -895,7 +911,12 @@ void msm_gem_evict(struct drm_gem_object *obj)
 	/* Get rid of any iommu mapping(s): */
 	put_iova_spaces(obj, false);
 
+#ifdef __FreeBSD__
+	(void)dev;
+	drm_vma_node_unmap(&obj->vma_node, obj);
+#else
 	drm_vma_node_unmap(&obj->vma_node, dev->anon_inode->i_mapping);
+#endif
 
 	put_pages(obj);
 }
@@ -1268,7 +1289,9 @@ struct drm_gem_object *msm_gem_new(struct drm_device *dev, uint32_t size, uint32
 		 * See comments above new_inode() why this is required _and_
 		 * expected if you're going to pin these pages.
 		 */
+#ifndef __FreeBSD__
 		mapping_set_gfp_mask(obj->filp->f_mapping, GFP_HIGHUSER);
+#endif
 	}
 
 	drm_gem_lru_move_tail(&priv->lru.unbacked, obj);

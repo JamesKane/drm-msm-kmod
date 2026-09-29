@@ -6,7 +6,7 @@ DRMKMOD?=	${.CURDIR:H:H}/drm-kmod
 
 MSMDIR=	${.CURDIR:H}/drivers/gpu/drm/msm
 
-.PATH:	${MSMDIR} ${MSMDIR}/adreno
+.PATH:	${MSMDIR} ${MSMDIR}/adreno ${.CURDIR:H}/freebsd
 
 KMOD=	msm
 
@@ -32,6 +32,14 @@ SRCS+=	adreno_device.c \
 	a6xx_hfi.c \
 	a6xx_preempt.c
 
+SRCS+=	msm_freebsd.c \
+	msm_freebsd_bus.c \
+	msm_freebsd_iommu.c \
+	msm_freebsd_misc.c \
+	msm_freebsd_platform.c \
+	msm_freebsd_power.c \
+	msm_freebsd_soc.c
+
 SRCS+=	opt_acpi.h \
 	opt_drm.h \
 	opt_platform.h \
@@ -49,6 +57,7 @@ CFLAGS+= -I${.CURDIR:H}/freebsd/include
 CFLAGS+= -I${.CURDIR:H}/include
 CFLAGS+= -I${.CURDIR:H}/include/uapi
 CFLAGS+= -I${MSMDIR}
+CFLAGS+= -I${.CURDIR:H}/freebsd
 CFLAGS+= -I${MSMDIR}/generated
 CFLAGS+= -I${DRMKMOD}/linuxkpi/gplv2/include
 CFLAGS+= -I${DRMKMOD}/linuxkpi/bsd/include
@@ -63,6 +72,9 @@ CFLAGS+= -I${DRMKMOD}/drivers/gpu
 CFLAGS+= '-DKBUILD_MODNAME="${KMOD}"'
 CFLAGS+= '-DLINUXKPI_PARAM_PREFIX=msm_' -DDRM_SYSCTL_PARAM_PREFIX=_${KMOD}
 CFLAGS+= ${KCONFIG:C/(.*)/-DCONFIG_\1/}
+CFLAGS+= -include ${.CURDIR:H}/freebsd/include/msm_freebsd_compat.h
 CFLAGS+= -DCONFIG_DRM_MSM -DCONFIG_QCOM_COMMAND_DB -DCONFIG_QCOM_MDT_LOADER
+
+CFLAGS.msm_freebsd_bus.c+= -DMSM_FBSD_BUS
 
 CWARNFLAGS+=	-Wno-format -Wno-gnu-pointer-arith -Wno-cast-qual

@@ -81,7 +81,12 @@ struct iommu_flush_ops {
 	    unsigned long iova, size_t granule, void *cookie);
 };
 
-bool	device_iommu_mapped(struct device *dev);
+enum iommu_cap {
+	IOMMU_CAP_CACHE_COHERENCY,
+	IOMMU_CAP_NOEXEC,
+};
+
+bool	device_iommu_capable(struct device *dev, enum iommu_cap cap);
 struct iommu_domain *iommu_paging_domain_alloc(struct device *dev);
 void	iommu_domain_free(struct iommu_domain *domain);
 int	iommu_attach_device(struct iommu_domain *domain, struct device *dev);
