@@ -294,6 +294,7 @@ static driver_t msm_fbsd_driver = {
 };
 
 DRIVER_MODULE(msm, acpi, msm_fbsd_driver, 0, 0);
+ACPI_PNP_INFO(msm_fbsd_acpi_ids);
 MODULE_DEPEND(msm, acpi, 1, 1, 1);
 MODULE_DEPEND(msm, drmn, 2, 2, 2);
 MODULE_DEPEND(msm, dmabuf, 1, 1, 1);
