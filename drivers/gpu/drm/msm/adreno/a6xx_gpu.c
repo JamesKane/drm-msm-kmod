@@ -2195,6 +2195,9 @@ static void a6xx_destroy(struct msm_gpu *gpu)
 		drm_gem_object_put(a6xx_gpu->shadow_bo);
 	}
 
+	/* Its mapping would keep the GPU's address space alive. */
+	msm_gem_kernel_put(a6xx_gpu->pwrup_reglist_bo, gpu->aspace);
+
 	a6xx_llc_slices_destroy(a6xx_gpu);
 
 	a6xx_gmu_remove(a6xx_gpu);
