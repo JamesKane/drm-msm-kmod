@@ -43,9 +43,13 @@ SRCS+=	msm_freebsd.c \
 SRCS+=	opt_acpi.h \
 	opt_drm.h \
 	opt_platform.h \
+	opt_vm.h \
 	acpi_if.h \
 	bus_if.h \
 	device_if.h \
+	iicbus_if.h \
+	pci_if.h \
+	pci_iov_if.h \
 	vnode_if.h
 
 .include <bsd.kmod.mk>
