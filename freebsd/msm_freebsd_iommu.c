@@ -159,6 +159,8 @@ msm_fbsd_map_flags(int prot)
 		flags |= QCOM_SMMU_READONLY;
 	if ((prot & IOMMU_CACHE) == 0)
 		flags |= QCOM_SMMU_UNCACHED;
+	if ((prot & IOMMU_PRIV) != 0)
+		flags |= QCOM_SMMU_PRIV;
 	return (flags);
 }
 
