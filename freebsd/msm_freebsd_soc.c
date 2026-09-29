@@ -119,7 +119,7 @@ static const struct msm_fbsd_pdev_desc sc8280xp_pdevs[] = {
 	 */
 	{ .name = "msm", .parent = "adreno" },
 	{ .name = "adreno", .node = "gpu", .res = sc8280xp_gpu_res,
-	  .opps = sc8280xp_gpu_opps,
+	  .opps = sc8280xp_gpu_opps, .gpu = true,
 	  .sid = { 0x0, 0x1 }, .sid_mask = { 0xc00, 0xc00 }, .nsids = 2 },
 	{ .name = "gmu", .node = "gmu", .res = sc8280xp_gmu_res,
 	  .opps = sc8280xp_gmu_opps,

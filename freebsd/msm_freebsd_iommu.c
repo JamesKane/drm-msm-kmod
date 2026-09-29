@@ -41,15 +41,34 @@
 #include <linux/slab.h>
 #include <linux/sizes.h>
 
+#include <linux/adreno-smmu-priv.h>
+#include <linux/io-pgtable.h>
+
 #include <dev/qcom_smmu/qcom_smmu.h>
 
 #include "msm_freebsd.h"
 
+/*
+ * As Linux's SMMU driver does for the Adreno GPU, the GPU's domain has
+ * split page tables: its own, holding the kernel's mappings, translate the
+ * top of the address space, and msm's per-process tables, made with
+ * io-pgtable, the bottom.  The GPU switches between the per-process tables
+ * itself, in context bank 0.
+ */
 struct msm_fbsd_domain {
 	struct qcom_smmu_pt	*pt;
 	struct qcom_smmu_cb	*cb;
 	const struct msm_fbsd_pdev_desc *desc;
+	struct adreno_smmu_priv	*adreno_smmu;	/* the GPU's, while attached */
+	struct io_pgtable_cfg	ttbr1_cfg;
 };
+
+struct msm_fbsd_io_pgtable {
+	struct io_pgtable_ops	ops;
+	struct qcom_smmu_pt	*pt;
+};
+
+static u_int	msm_fbsd_map_flags(int prot);
 
 static struct qcom_smmu *msm_fbsd_smmu;
 
@@ -80,6 +99,139 @@ device_iommu_capable(struct device *dev, enum iommu_cap cap)
 	return (device_iommu_mapped(dev) && cap == IOMMU_CAP_CACHE_COHERENCY);
 }
 
+/* The GPU's adreno_smmu_priv, which msm uses for per-process page tables. */
+
+static void
+msm_fbsd_tlb_flush_all(void *cookie)
+{
+	struct msm_fbsd_domain *fd = __DECONST(struct msm_fbsd_domain *, cookie);
+
+	if (fd->cb != NULL)
+		(void)qcom_smmu_cb_tlb_inv(fd->cb);
+}
+
+static void
+msm_fbsd_tlb_flush_walk(unsigned long iova __unused, size_t size __unused,
+    size_t granule __unused, void *cookie)
+{
+	msm_fbsd_tlb_flush_all(cookie);
+}
+
+static void
+msm_fbsd_tlb_add_page(struct iommu_iotlb_gather *gather __unused,
+    unsigned long iova __unused, size_t granule __unused, void *cookie)
+{
+	msm_fbsd_tlb_flush_all(cookie);
+}
+
+static const struct iommu_flush_ops msm_fbsd_tlb_ops = {
+	.tlb_flush_all = msm_fbsd_tlb_flush_all,
+	.tlb_flush_walk = msm_fbsd_tlb_flush_walk,
+	.tlb_add_page = msm_fbsd_tlb_add_page,
+};
+
+static const struct io_pgtable_cfg *
+msm_fbsd_get_ttbr1_cfg(const void *cookie)
+{
+	const struct msm_fbsd_domain *fd = cookie;
+
+	return (&fd->ttbr1_cfg);
+}
+
+/* Point TTBR0 at a per-process table, or with no table, turn it off. */
+static int
+msm_fbsd_set_ttbr0_cfg(const void *cookie, const struct io_pgtable_cfg *cfg)
+{
+	const struct msm_fbsd_domain *fd = cookie;
+
+	return (-qcom_smmu_cb_set_ttbr0(fd->cb,
+	    cfg != NULL ? cfg->arm_lpae_s1_cfg.ttbr : 0));
+}
+
+static void
+msm_fbsd_adreno_smmu_init(struct msm_fbsd_domain *fd, struct device *dev)
+{
+	struct io_pgtable_cfg *cfg = &fd->ttbr1_cfg;
+
+	memset(cfg, 0, sizeof(*cfg));
+	cfg->quirks = IO_PGTABLE_QUIRK_ARM_TTBR1;
+	cfg->pgsize_bitmap = SZ_4K;
+	cfg->ias = 48;
+	cfg->oas = 48;
+	cfg->coherent_walk = true;
+	cfg->tlb = &msm_fbsd_tlb_ops;
+	cfg->iommu_dev = dev;
+	cfg->arm_lpae_s1_cfg.ttbr = qcom_smmu_pt_root(fd->pt);
+
+	/* msm_gpu_init() made the priv the device's driver data. */
+	fd->adreno_smmu = dev_get_drvdata(dev);
+	fd->adreno_smmu->cookie = fd;
+	fd->adreno_smmu->get_ttbr1_cfg = msm_fbsd_get_ttbr1_cfg;
+	fd->adreno_smmu->set_ttbr0_cfg = msm_fbsd_set_ttbr0_cfg;
+}
+
+/* io-pgtable, for msm's per-process page tables. */
+
+static struct msm_fbsd_io_pgtable *
+to_fbsd_pgtable(struct io_pgtable_ops *ops)
+{
+	return (container_of(ops, struct msm_fbsd_io_pgtable, ops));
+}
+
+static int
+msm_fbsd_pgtable_map(struct io_pgtable_ops *ops, unsigned long iova,
+    phys_addr_t paddr, size_t pgsize, size_t pgcount, int prot,
+    gfp_t gfp __unused, size_t *mapped)
+{
+	int error;
+
+	error = qcom_smmu_map(to_fbsd_pgtable(ops)->pt, iova, paddr,
+	    pgsize * pgcount, msm_fbsd_map_flags(prot));
+	if (error == 0)
+		*mapped += pgsize * pgcount;
+	return (-error);
+}
+
+static size_t
+msm_fbsd_pgtable_unmap(struct io_pgtable_ops *ops, unsigned long iova,
+    size_t pgsize, size_t pgcount, struct iommu_iotlb_gather *gather __unused)
+{
+	qcom_smmu_unmap(to_fbsd_pgtable(ops)->pt, iova, pgsize * pgcount);
+	return (pgsize * pgcount);
+}
+
+struct io_pgtable_ops *
+alloc_io_pgtable_ops(enum io_pgtable_fmt fmt, struct io_pgtable_cfg *cfg,
+    void *cookie __unused)
+{
+	struct msm_fbsd_io_pgtable *pgt;
+
+	if (fmt != ARM_64_LPAE_S1 ||
+	    (cfg->quirks & IO_PGTABLE_QUIRK_ARM_TTBR1) != 0)
+		return (NULL);
+	pgt = kzalloc(sizeof(*pgt), GFP_KERNEL);
+	if (pgt == NULL)
+		return (NULL);
+	pgt->pt = qcom_smmu_pt_create(0);
+	pgt->ops.map_pages = msm_fbsd_pgtable_map;
+	pgt->ops.unmap_pages = msm_fbsd_pgtable_unmap;
+	cfg->pgsize_bitmap = SZ_4K;
+	cfg->arm_lpae_s1_cfg.ttbr = qcom_smmu_pt_root(pgt->pt);
+	return (&pgt->ops);
+}
+
+void
+free_io_pgtable_ops(struct io_pgtable_ops *ops)
+{
+	struct msm_fbsd_io_pgtable *pgt;
+
+	if (ops == NULL)
+		return;
+	pgt = to_fbsd_pgtable(ops);
+	qcom_smmu_pt_destroy(pgt->pt);
+	kfree(pgt);
+}
+
 struct iommu_domain *
 iommu_paging_domain_alloc(struct device *dev)
 {
@@ -90,12 +242,18 @@ iommu_paging_domain_alloc(struct device *dev)
 		return (ERR_PTR(-ENODEV));
 	domain = kzalloc(sizeof(*domain), GFP_KERNEL);
 	fd = kzalloc(sizeof(*fd), GFP_KERNEL);
-	fd->pt = qcom_smmu_pt_create();
 	domain->fbsd = fd;
 	domain->pgsize_bitmap = SZ_4K;
-	domain->geometry.aperture_start = 0;
-	domain->geometry.aperture_end = (1ULL << 48) - 1;
 	domain->geometry.force_aperture = true;
+	if (msm_fbsd_pdev_desc(dev)->gpu) {
+		fd->pt = qcom_smmu_pt_create(QCOM_SMMU_PT_UPPER);
+		domain->geometry.aperture_start = ~0UL << 48;
+		domain->geometry.aperture_end = ~0UL;
+	} else {
+		fd->pt = qcom_smmu_pt_create(0);
+		domain->geometry.aperture_start = 0;
+		domain->geometry.aperture_end = (1UL << 48) - 1;
+	}
 	return (domain);
 }
 
@@ -124,6 +282,14 @@ iommu_attach_device(struct iommu_domain *domain, struct device *dev)
 	if (error != 0)
 		return (-error);
 	fd->desc = desc;
+	if (desc->gpu) {
+		/* The GPU switches page tables in bank 0 (adreno_hw_init()). */
+		if (qcom_smmu_cb_index(fd->cb) != 0) {
+			iommu_detach_device(domain, dev);
+			return (-EBUSY);
+		}
+		msm_fbsd_adreno_smmu_init(fd, dev);
+	}
 	for (i = 0; i < desc->nsids; i++) {
 		error = qcom_smmu_attach_stream(fd->cb, desc->sid[i],
 		    desc->sid_mask[i]);
@@ -143,6 +309,10 @@ iommu_detach_device(struct iommu_domain *domain, struct device *dev __unused)
 
 	if (fd->cb == NULL)
 		return;
+	if (fd->adreno_smmu != NULL) {
+		memset(fd->adreno_smmu, 0, sizeof(*fd->adreno_smmu));
+		fd->adreno_smmu = NULL;
+	}
 	for (i = 0; i < fd->desc->nsids; i++)
 		qcom_smmu_detach_stream(msm_fbsd_smmu, fd->desc->sid[i],
 		    fd->desc->sid_mask[i]);

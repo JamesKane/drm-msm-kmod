@@ -27,8 +27,8 @@
 
 
 /*
- * io-pgtable, as msm uses it for per-process GPU page tables.  Not provided
- * yet: allocation fails, and msm then uses one GPU address space for all.
+ * io-pgtable, as msm uses it for per-process GPU page tables: ARM_64_LPAE_S1
+ * tables for TTBR0, on qcom_smmu(4) page tables (msm_freebsd_iommu.c).
  */
 #ifndef _MSM_FREEBSD_LINUX_IO_PGTABLE_H_
 #define	_MSM_FREEBSD_LINUX_IO_PGTABLE_H_
@@ -85,16 +85,8 @@ struct io_pgtable_ops {
 	    unsigned long iova);
 };
 
-static inline struct io_pgtable_ops *
-alloc_io_pgtable_ops(enum io_pgtable_fmt fmt __unused,
-    struct io_pgtable_cfg *cfg __unused, void *cookie __unused)
-{
-	return (NULL);
-}
-
-static inline void
-free_io_pgtable_ops(struct io_pgtable_ops *ops __unused)
-{
-}
+struct io_pgtable_ops *alloc_io_pgtable_ops(enum io_pgtable_fmt fmt,
+	    struct io_pgtable_cfg *cfg, void *cookie);
+void	free_io_pgtable_ops(struct io_pgtable_ops *ops);
 
 #endif

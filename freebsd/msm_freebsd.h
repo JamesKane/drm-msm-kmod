@@ -52,6 +52,7 @@ struct msm_fbsd_pdev_desc {
 	const char			*name;
 	const char			*node;	/* its device tree node */
 	const char			*parent; /* an earlier device, or NULL */
+	bool				gpu;	/* per-process page tables */
 	const struct msm_fbsd_res	*res;
 	const struct msm_fbsd_opp	*opps;
 	/* SMMU stream IDs and masks, as Linux's devicetree has them. */
