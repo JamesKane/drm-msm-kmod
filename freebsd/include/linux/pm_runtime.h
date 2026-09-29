@@ -27,8 +27,9 @@
 
 
 /*
- * Runtime power management, synchronous: the first get resumes a device
- * through its driver's runtime_resume, the last put suspends it.
+ * Runtime power management: the first get resumes a device through its
+ * driver's runtime_resume, and the last put suspends it, at once or, with
+ * autosuspend, once the device has been idle for the autosuspend delay.
  * Replaces LinuxKPI's no-op version (msm_freebsd_power.c).
  */
 #ifndef _MSM_FREEBSD_LINUX_PM_RUNTIME_H_
@@ -38,6 +39,12 @@
 
 int	pm_runtime_get_sync(struct device *dev);
 int	pm_runtime_put_sync(struct device *dev);
+int	pm_runtime_put_sync_suspend(struct device *dev);
+int	pm_runtime_put_noidle(struct device *dev);
+void	pm_runtime_mark_last_busy(struct device *dev);
+void	pm_runtime_use_autosuspend(struct device *dev);
+void	pm_runtime_dont_use_autosuspend(struct device *dev);
+void	pm_runtime_set_autosuspend_delay(struct device *dev, int ms);
 int	pm_runtime_get_if_in_use(struct device *dev);
 bool	pm_runtime_active(struct device *dev);
 void	pm_runtime_enable(struct device *dev);
@@ -59,14 +66,9 @@ pm_runtime_resume_and_get(struct device *dev)
 	return (0);
 }
 
+/* Asynchronous calls are synchronous; autosuspend is still deferred. */
 #define	pm_runtime_get(dev)		pm_runtime_get_sync(dev)
 #define	pm_runtime_put(dev)		pm_runtime_put_sync(dev)
 #define	pm_runtime_put_autosuspend(dev)	pm_runtime_put_sync(dev)
-#define	pm_runtime_put_sync_suspend(dev) pm_runtime_put_sync(dev)
-#define	pm_runtime_put_noidle(dev)	pm_runtime_put_sync(dev)
-#define	pm_runtime_mark_last_busy(dev)	((void)(dev))
-#define	pm_runtime_use_autosuspend(dev)	((void)(dev))
-#define	pm_runtime_dont_use_autosuspend(dev) ((void)(dev))
-#define	pm_runtime_set_autosuspend_delay(dev, ms) ((void)(dev), (void)(ms))
 
 #endif

@@ -44,6 +44,7 @@
 #include <linux/pm_domain.h>
 #include <linux/pm_opp.h>
 #include <linux/pm_runtime.h>
+#include <linux/workqueue.h>
 
 #include "msm_freebsd.h"
 
@@ -55,7 +56,13 @@ static struct msm_fbsd_rpm {
 	int		usage;
 	bool		enabled;
 	bool		active;
+	bool		autosuspend;
+	int		delay_ms;	/* autosuspend delay */
+	unsigned long	last_busy;	/* jiffies */
+	struct delayed_work suspend_work;
 } msm_fbsd_rpm[8];
+
+static void	msm_fbsd_rpm_suspend_work(struct work_struct *work);
 
 static DEFINE_MUTEX(msm_fbsd_rpm_lock);	/* protects the slots */
 
@@ -85,7 +92,11 @@ msm_fbsd_rpm_get(struct device *dev)
 		r->usage = 0;
 		r->enabled = false;
 		r->active = false;
+		r->autosuspend = false;
+		r->delay_ms = 0;
+		r->last_busy = jiffies;
 		mutex_init(&r->lock);
+		INIT_DELAYED_WORK(&r->suspend_work, msm_fbsd_rpm_suspend_work);
 	}
 	mutex_unlock(&msm_fbsd_rpm_lock);
 	if (r != NULL)
@@ -137,9 +148,55 @@ msm_fbsd_rpm_fini(void)
 	for (i = 0; i < nitems(msm_fbsd_rpm); i++) {
 		if (msm_fbsd_rpm[i].dev == NULL)
 			continue;
+		cancel_delayed_work_sync(&msm_fbsd_rpm[i].suspend_work);
 		mutex_destroy(&msm_fbsd_rpm[i].lock);
 		msm_fbsd_rpm[i].dev = NULL;
 	}
+}
+
+/*
+ * The device has just become idle.  Suspend it, unless it uses autosuspend
+ * and now is false: then suspend it once it has been idle for the delay.
+ */
+static void
+msm_fbsd_rpm_idle(struct device *dev, struct msm_fbsd_rpm *r, bool now)
+{
+	long left;
+
+	if (!r->active)
+		return;
+	if (now || !r->autosuspend || r->delay_ms < 0) {
+		msm_fbsd_rpm_suspend(dev, r);
+		return;
+	}
+	left = (long)(r->last_busy + msecs_to_jiffies(r->delay_ms) - jiffies);
+	mod_delayed_work(system_wq, &r->suspend_work, left > 0 ? left : 0);
+}
+
+static void
+msm_fbsd_rpm_suspend_work(struct work_struct *work)
+{
+	struct msm_fbsd_rpm *r = container_of(to_delayed_work(work),
+	    struct msm_fbsd_rpm, suspend_work);
+
+	mutex_lock(&r->lock);
+	/* A get may have come in; a mark_last_busy() moves the deadline. */
+	if (r->dev != NULL && r->usage == 0)
+		msm_fbsd_rpm_idle(r->dev, r, false);
+	mutex_unlock(&r->lock);
+}
+
+static int
+msm_fbsd_rpm_put(struct device *dev, bool idle, bool now)
+{
+	struct msm_fbsd_rpm *r;
+
+	if ((r = msm_fbsd_rpm_get(dev)) == NULL)
+		return (0);
+	if (r->usage > 0 && --r->usage == 0 && idle)
+		msm_fbsd_rpm_idle(dev, r, now);
+	mutex_unlock(&r->lock);
+	return (0);
 }
 
 int
@@ -150,6 +207,8 @@ pm_runtime_get_sync(struct device *dev)
 
 	if ((r = msm_fbsd_rpm_get(dev)) == NULL)
 		return (-ENOMEM);
+	/* The work rechecks the count under the lock we hold. */
+	cancel_delayed_work(&r->suspend_work);
 	r->usage++;
 	error = r->usage == 1 ? msm_fbsd_rpm_resume(dev, r) : 0;
 	mutex_unlock(&r->lock);
@@ -159,14 +218,67 @@ pm_runtime_get_sync(struct device *dev)
 int
 pm_runtime_put_sync(struct device *dev)
 {
+	return (msm_fbsd_rpm_put(dev, true, false));
+}
+
+int
+pm_runtime_put_sync_suspend(struct device *dev)
+{
+	return (msm_fbsd_rpm_put(dev, true, true));
+}
+
+int
+pm_runtime_put_noidle(struct device *dev)
+{
+	return (msm_fbsd_rpm_put(dev, false, false));
+}
+
+void
+pm_runtime_mark_last_busy(struct device *dev)
+{
 	struct msm_fbsd_rpm *r;
 
 	if ((r = msm_fbsd_rpm_get(dev)) == NULL)
-		return (0);
-	if (r->usage > 0 && --r->usage == 0)
-		msm_fbsd_rpm_suspend(dev, r);
+		return;
+	r->last_busy = jiffies;
 	mutex_unlock(&r->lock);
-	return (0);
+}
+
+void
+pm_runtime_set_autosuspend_delay(struct device *dev, int ms)
+{
+	struct msm_fbsd_rpm *r;
+
+	if ((r = msm_fbsd_rpm_get(dev)) == NULL)
+		return;
+	r->delay_ms = ms;
+	mutex_unlock(&r->lock);
+}
+
+void
+pm_runtime_use_autosuspend(struct device *dev)
+{
+	struct msm_fbsd_rpm *r;
+
+	if ((r = msm_fbsd_rpm_get(dev)) == NULL)
+		return;
+	r->autosuspend = true;
+	mutex_unlock(&r->lock);
+}
+
+/* As on Linux, an idle device suspends at once when autosuspend stops. */
+void
+pm_runtime_dont_use_autosuspend(struct device *dev)
+{
+	struct msm_fbsd_rpm *r;
+
+	if ((r = msm_fbsd_rpm_get(dev)) == NULL)
+		return;
+	r->autosuspend = false;
+	cancel_delayed_work(&r->suspend_work);
+	if (r->usage == 0)
+		msm_fbsd_rpm_idle(dev, r, true);
+	mutex_unlock(&r->lock);
 }
 
 int
@@ -239,6 +351,7 @@ pm_runtime_force_suspend(struct device *dev)
 
 	if ((r = msm_fbsd_rpm_get(dev)) == NULL)
 		return (0);
+	cancel_delayed_work(&r->suspend_work);
 	msm_fbsd_rpm_suspend(dev, r);
 	mutex_unlock(&r->lock);
 	return (0);
