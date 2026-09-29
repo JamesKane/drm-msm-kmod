@@ -1,0 +1,65 @@
+# The msm DRM driver (Qualcomm Adreno GPU), built against drm-kmod.
+# GPU only for now: display stays with the firmware framebuffer.
+
+DRMKMOD?=	${.CURDIR:H:H}/drm-kmod
+.include "${DRMKMOD}/kconfig.mk"
+
+MSMDIR=	${.CURDIR:H}/drivers/gpu/drm/msm
+
+.PATH:	${MSMDIR} ${MSMDIR}/adreno
+
+KMOD=	msm
+
+SRCS=	msm_drv.c \
+	msm_fence.c \
+	msm_gem.c \
+	msm_gem_prime.c \
+	msm_gem_shrinker.c \
+	msm_gem_submit.c \
+	msm_gem_vma.c \
+	msm_gpu.c \
+	msm_gpu_devfreq.c \
+	msm_io_utils.c \
+	msm_iommu.c \
+	msm_ringbuffer.c \
+	msm_submitqueue.c
+
+SRCS+=	adreno_device.c \
+	adreno_gpu.c \
+	a6xx_catalog.c \
+	a6xx_gmu.c \
+	a6xx_gpu.c \
+	a6xx_hfi.c \
+	a6xx_preempt.c
+
+SRCS+=	opt_acpi.h \
+	opt_drm.h \
+	opt_platform.h \
+	acpi_if.h \
+	bus_if.h \
+	device_if.h \
+	vnode_if.h
+
+.include <bsd.kmod.mk>
+
+.include "${DRMKMOD}/linuxkpi_version.mk"
+.include "${DRMKMOD}/compiler_flags.mk"
+
+CFLAGS+= -I${.CURDIR:H}/include
+CFLAGS+= -I${.CURDIR:H}/include/uapi
+CFLAGS+= -I${MSMDIR}
+CFLAGS+= -I${DRMKMOD}/linuxkpi/gplv2/include
+CFLAGS+= -I${DRMKMOD}/linuxkpi/bsd/include
+CFLAGS+= -I${SYSDIR}/compat/linuxkpi/common/include
+CFLAGS+= -I${SYSDIR}/compat/linuxkpi/dummy/include
+CFLAGS+= -I${DRMKMOD}/include
+CFLAGS+= -I${DRMKMOD}/include/drm
+CFLAGS+= -I${DRMKMOD}/include/uapi
+CFLAGS+= -I${DRMKMOD}/drivers/gpu
+
+CFLAGS+= '-DKBUILD_MODNAME="${KMOD}"'
+CFLAGS+= '-DLINUXKPI_PARAM_PREFIX=msm_'
+CFLAGS+= ${KCONFIG:C/(.*)/-DCONFIG_\1/}
+CFLAGS+= -DCONFIG_DRM_MSM
+
+CWARNFLAGS+=	-Wno-format -Wno-gnu-pointer-arith -Wno-cast-qual
