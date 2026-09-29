@@ -353,15 +353,16 @@ iommu_detach_device(struct iommu_domain *domain, struct device *dev __unused)
 
 	if (fd->cb == NULL)
 		return;
-	if (fd->adreno_smmu != NULL) {
-		memset(fd->adreno_smmu, 0, sizeof(*fd->adreno_smmu));
-		fd->adreno_smmu = NULL;
-	}
 	for (i = 0; i < fd->desc->nsids; i++)
 		qcom_smmu_detach_stream(msm_fbsd_smmu, fd->desc->sid[i],
 		    fd->desc->sid_mask[i]);
 	qcom_smmu_cb_free(fd->cb);
 	fd->cb = NULL;
+	/* Only now can no fault handler be using the callbacks. */
+	if (fd->adreno_smmu != NULL) {
+		memset(fd->adreno_smmu, 0, sizeof(*fd->adreno_smmu));
+		fd->adreno_smmu = NULL;
+	}
 }
 
 static u_int
