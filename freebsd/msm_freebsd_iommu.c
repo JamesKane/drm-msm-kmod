@@ -37,6 +37,7 @@
 #include <linux/device.h>
 #include <linux/err.h>
 #include <linux/iommu.h>
+#include <linux/sched.h>
 #include <linux/scatterlist.h>
 #include <linux/slab.h>
 #include <linux/sizes.h>
@@ -61,6 +62,9 @@ struct msm_fbsd_domain {
 	const struct msm_fbsd_pdev_desc *desc;
 	struct adreno_smmu_priv	*adreno_smmu;	/* the GPU's, while attached */
 	struct io_pgtable_cfg	ttbr1_cfg;
+	struct iommu_domain	*domain;
+	struct device		*dev;		/* while attached */
+	struct qcom_smmu_fault	fault;		/* the last */
 };
 
 struct msm_fbsd_io_pgtable {
@@ -149,6 +153,21 @@ msm_fbsd_set_ttbr0_cfg(const void *cookie, const struct io_pgtable_cfg *cfg)
 }
 
 static void
+msm_fbsd_get_fault_info(const void *cookie, struct adreno_smmu_fault_info *info)
+{
+	const struct qcom_smmu_fault *f = &((const struct msm_fbsd_domain *)
+	    cookie)->fault;
+
+	info->far = f->far;
+	info->ttbr0 = f->ttbr0;
+	info->contextidr = f->contextidr;
+	info->fsr = f->fsr;
+	info->fsynr0 = f->fsynr0;
+	info->fsynr1 = f->fsynr1;
+	info->cbfrsynra = f->cbfrsynra;
+}
+
+static void
 msm_fbsd_adreno_smmu_init(struct msm_fbsd_domain *fd, struct device *dev)
 {
 	struct io_pgtable_cfg *cfg = &fd->ttbr1_cfg;
@@ -168,6 +187,26 @@ msm_fbsd_adreno_smmu_init(struct msm_fbsd_domain *fd, struct device *dev)
 	fd->adreno_smmu->cookie = fd;
 	fd->adreno_smmu->get_ttbr1_cfg = msm_fbsd_get_ttbr1_cfg;
 	fd->adreno_smmu->set_ttbr0_cfg = msm_fbsd_set_ttbr0_cfg;
+	fd->adreno_smmu->get_fault_info = msm_fbsd_get_fault_info;
+}
+
+/* A context fault, from qcom_smmu's interrupt thread. */
+static void
+msm_fbsd_fault(void *arg, const struct qcom_smmu_fault *f)
+{
+	struct msm_fbsd_domain *fd = arg;
+	struct iommu_domain *domain = fd->domain;
+
+	fd->fault = *f;
+	if (domain->handler == NULL) {
+		printf("msm: %s: SMMU fault at %#jx, fsr %#x fsynr0 %#x\n",
+		    fd->desc->name, (uintmax_t)f->far, f->fsr, f->fsynr0);
+		return;
+	}
+	linux_set_current(curthread);
+	(void)domain->handler(domain, fd->dev, f->far,
+	    (f->fsynr0 & QCOM_SMMU_FSYNR0_WNR) != 0 ? IOMMU_FAULT_WRITE :
+	    IOMMU_FAULT_READ, domain->handler_token);
 }
 
 /* io-pgtable, for msm's per-process page tables. */
@@ -243,6 +282,7 @@ iommu_paging_domain_alloc(struct device *dev)
 	domain = kzalloc(sizeof(*domain), GFP_KERNEL);
 	fd = kzalloc(sizeof(*fd), GFP_KERNEL);
 	domain->fbsd = fd;
+	fd->domain = domain;
 	domain->pgsize_bitmap = SZ_4K;
 	domain->geometry.force_aperture = true;
 	if (msm_fbsd_pdev_desc(dev)->gpu) {
@@ -282,6 +322,10 @@ iommu_attach_device(struct iommu_domain *domain, struct device *dev)
 	if (error != 0)
 		return (-error);
 	fd->desc = desc;
+	fd->dev = dev;
+	if (qcom_smmu_cb_set_fault_handler(fd->cb, msm_fbsd_fault, fd) != 0)
+		device_printf(dev->bsddev, "%s: no SMMU fault interrupt\n",
+		    desc->name);
 	if (desc->gpu) {
 		/* The GPU switches page tables in bank 0 (adreno_hw_init()). */
 		if (qcom_smmu_cb_index(fd->cb) != 0) {
