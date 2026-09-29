@@ -42,6 +42,20 @@ Generic pieces that belong in LinuxKPI or drm-kmod eventually:
 absolute-mode hrtimers, `readl_poll_timeout`, 64-bit `SZ_*G` (LinuxKPI's
 overflow), `idr_alloc_u32`, platform devices, `drm_gem_get_pages()`.
 
+## Licensing
+
+Each file states its license with an SPDX identifier or in its own text;
+the license texts are in `LICENSES/`:
+
+- GPL-2.0 (`GPL-2.0-only`, and a few `GPL-2.0-or-later`): the msm driver
+  and the Linux headers imported with it.
+- MIT: the Adreno register descriptions in
+  `drivers/gpu/drm/msm/registers/`, the headers generated from them in
+  `drivers/gpu/drm/msm/generated/`, and `gen_header.py`.
+- BSD-2-Clause: the FreeBSD glue in `freebsd/`, `msm/`, and `tools/`.
+
+The module built from these, msm.ko, is covered by the GPL-2.0.
+
 Build (cross or native): `make DRMKMOD=/path/to/drm-kmod SYSDIR=/usr/src/sys`.
 
 Status: work in progress.  On a Radxa Dragon Q8B (SC8280XP, Adreno 690)
