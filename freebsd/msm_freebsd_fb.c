@@ -36,8 +36,12 @@
  * the console.
  *
  * The DisplayPort controller's AUX channel reads the sink's capabilities and
- * the monitor's EDID, which the connector reports.  Its transfers are polled:
- * the DP controller's interrupts stay masked, as the firmware left them.
+ * the monitor's EDID, which the connector reports.  Its transfers are polled,
+ * with the controller's AUX interrupts masked, as the firmware left them;
+ * only its hotplug events interrupt.  A DP-to-HDMI bridge keeps hotplug high
+ * while it is there and signals its monitor coming and going with IRQ_HPD
+ * pulses and its DPCD sink count, so the monitor is connected when both say
+ * so.
  *
  * The firmware leaves the display's SMMU streams in bypass, so the pipe
  * fetches physical addresses, through 32-bit registers: buffers are
@@ -87,6 +91,8 @@
 #include <drm/drm_plane.h>
 #include <drm/drm_prime.h>
 #include <drm/drm_probe_helper.h>
+#include <linux/mutex.h>
+#include <linux/workqueue.h>
 #include <drm/drm_vblank.h>
 
 #include "msm_freebsd.h"
@@ -94,6 +100,10 @@
 #define	MSMFB_CPP		4
 
 /* DPU registers, relative to the MDP block. */
+/* MDSS registers, relative to the display window. */
+#define	MDSS_HW_INTR_STATUS	0x010
+#define	 MDSS_INTR_MDP		(1u << 0)
+
 #define	MDP_INTR_EN		0x010
 #define	MDP_INTR_STATUS		0x014
 #define	MDP_INTR_CLEAR		0x018
@@ -112,6 +122,12 @@
 #define	 DP_AUX_TRANS_GO	(1u << 9)
 #define	 DP_AUX_TRANS_NO_SEND_ADDR (1u << 10)
 #define	 DP_AUX_TRANS_NO_SEND_STOP (1u << 11)
+#define	DP_HPD_INT_STATUS	0x204
+#define	 DP_HPD_STATE_MASK	0xe0000000u
+#define	 DP_HPD_STATE_CONNECTED	0x40000000u
+#define	 DP_HPD_EVENTS		0x0000000fu	/* plug, IRQ_HPD, replug, unplug */
+#define	DP_HPD_INT_ACK		0x208
+#define	DP_HPD_INT_MASK		0x20c
 #define	DP_PHY_AUX_INTR_CLEAR	0x24c
 #define	DP_PHY_AUX_INTR_STATUS	0x2bc
 /*
@@ -130,9 +146,13 @@ extern struct vt_device *main_vd;
 struct msmfb {
 	struct drm_device		drm;
 	const struct msm_fbsd_disp	*disp;
+	void __iomem			*mdss;
 	void __iomem			*mdp;
 	void __iomem			*dp;
+	struct mutex			sink_lock;	/* AUX, and below */
 	const struct drm_edid		*edid;		/* or NULL */
+	bool				connected;
+	struct work_struct		hotplug_work;
 	u32				console_addr;	/* the firmware's scanout */
 	u32				console_stride;
 	u_int				width, height;
@@ -321,7 +341,7 @@ msmfb_read_edid(struct msmfb *fb)
 	return (fb->edid);
 }
 
-/* Report the sink and the monitor. */
+/* Report the sink's capabilities. */
 static void
 msmfb_probe_sink(struct msmfb *fb)
 {
@@ -338,10 +358,63 @@ msmfb_probe_sink(struct msmfb *fb)
 	    dpcd[DP_MAX_LANE_COUNT] & DP_MAX_LANE_COUNT_MASK,
 	    dpcd[DP_MAX_LINK_RATE] * 27 / 100,
 	    dpcd[DP_MAX_LINK_RATE] * 27 % 100);
-	if (msmfb_read_edid(fb) != NULL)
-		dev_info(fb->drm.dev, "monitor EDID read, %zu bytes\n",
-		    drm_edid_raw(fb->edid)->extensions != 0 ? (size_t)256 :
-		    (size_t)EDID_LENGTH);
+}
+
+/*
+ * Find out whether a monitor is connected, and read its EDID if one is; with
+ * sink_lock held.  Returns whether anything changed.
+ */
+static bool
+msmfb_update_sink(struct msmfb *fb)
+{
+	u8 st[6], irq;
+	bool connected, changed;
+	u32 hpd;
+
+	hpd = msmfb_dp_read(fb, DP_HPD_INT_STATUS) & DP_HPD_STATE_MASK;
+	connected = false;
+	if (hpd == DP_HPD_STATE_CONNECTED &&
+	    msmfb_aux(fb, false, true, DP_SINK_COUNT, st, sizeof(st)) == 0) {
+		connected = DP_GET_SINK_COUNT(st[0]) > 0;
+		dev_info(fb->drm.dev, "sink count %d, service IRQ %#x, lanes "
+		    "%#04x %#04x, align %#x\n", DP_GET_SINK_COUNT(st[0]), st[1],
+		    st[2], st[3], st[4]);
+		/* Clear the service requests it reported. */
+		irq = st[1];
+		if (irq != 0)
+			(void)msmfb_aux(fb, false, false,
+			    DP_DEVICE_SERVICE_IRQ_VECTOR, &irq, 1);
+	}
+	changed = connected != fb->connected;
+	if (connected) {
+		drm_edid_free(fb->edid);
+		fb->edid = NULL;
+		if (msmfb_read_edid(fb) != NULL)
+			dev_info(fb->drm.dev, "monitor EDID read, %zu bytes\n",
+			    drm_edid_raw(fb->edid)->extensions != 0 ?
+			    (size_t)256 : (size_t)EDID_LENGTH);
+		changed = true;		/* it may be another monitor */
+	} else if (fb->edid != NULL) {
+		drm_edid_free(fb->edid);
+		fb->edid = NULL;
+	}
+	fb->connected = connected;
+	return (changed);
+}
+
+static void
+msmfb_hotplug_work(struct work_struct *work)
+{
+	struct msmfb *fb = container_of(work, struct msmfb, hotplug_work);
+	bool changed;
+
+	mutex_lock(&fb->sink_lock);
+	changed = msmfb_update_sink(fb);
+	mutex_unlock(&fb->sink_lock);
+	dev_info(fb->drm.dev, "hotplug: monitor %s\n",
+	    fb->connected ? "connected" : "disconnected");
+	if (changed)
+		drm_kms_helper_hotplug_event(&fb->drm);
 }
 
 /* GEM objects */
@@ -575,11 +648,22 @@ msmfb_irq(int irq, void *arg)
 {
 	struct msmfb *fb = arg;
 	const struct msm_fbsd_disp *d = fb->disp;
-	u32 status;
+	irqreturn_t ret = IRQ_NONE;
+	u32 mdss, status;
 
+	mdss = readl(fb->mdss + MDSS_HW_INTR_STATUS);
+	if ((mdss & d->mdss_intr_dp) != 0) {
+		/* Hotplug: acknowledge, and look at the sink from a task. */
+		status = msmfb_dp_read(fb, DP_HPD_INT_STATUS) &
+		    msmfb_dp_read(fb, DP_HPD_INT_MASK) & DP_HPD_EVENTS;
+		msmfb_dp_write(fb, DP_HPD_INT_ACK, status);
+		if (status != 0)
+			schedule_work(&fb->hotplug_work);
+		ret = IRQ_HANDLED;
+	}
 	status = msmfb_read(fb, MDP_INTR_STATUS) & msmfb_read(fb, MDP_INTR_EN);
 	if ((status & d->intr_vsync) == 0)
-		return (IRQ_NONE);
+		return (ret);
 	msmfb_write(fb, MDP_INTR_CLEAR, d->intr_vsync);
 
 	drm_crtc_handle_vblank(&fb->crtc);
@@ -723,10 +807,24 @@ static int
 msmfb_connector_get_modes(struct drm_connector *connector)
 {
 	struct msmfb *fb = container_of(connector, struct msmfb, connector);
+	int n;
 
 	/* The monitor's identity; the mode stays the firmware's for now. */
+	mutex_lock(&fb->sink_lock);
 	drm_edid_connector_update(connector, fb->edid);
-	return (drm_connector_helper_get_modes_fixed(connector, &fb->mode));
+	n = fb->connected ?
+	    drm_connector_helper_get_modes_fixed(connector, &fb->mode) : 0;
+	mutex_unlock(&fb->sink_lock);
+	return (n);
+}
+
+static enum drm_connector_status
+msmfb_connector_detect(struct drm_connector *connector, bool force)
+{
+	struct msmfb *fb = container_of(connector, struct msmfb, connector);
+
+	return (READ_ONCE(fb->connected) ? connector_status_connected :
+	    connector_status_disconnected);
 }
 
 static const struct drm_connector_helper_funcs msmfb_connector_helper_funcs = {
@@ -735,6 +833,7 @@ static const struct drm_connector_helper_funcs msmfb_connector_helper_funcs = {
 
 static const struct drm_connector_funcs msmfb_connector_funcs = {
 	.reset = drm_atomic_helper_connector_reset,
+	.detect = msmfb_connector_detect,
 	.fill_modes = drm_helper_probe_single_connector_modes,
 	.destroy = drm_connector_cleanup,
 	.atomic_duplicate_state = drm_atomic_helper_connector_duplicate_state,
@@ -896,6 +995,7 @@ msmfb_kms_init(struct msmfb *fb)
 	if (error != 0)
 		return (error);
 	drm_connector_helper_add(&fb->connector, &msmfb_connector_helper_funcs);
+	fb->connector.polled = DRM_CONNECTOR_POLL_HPD;
 	error = drm_connector_attach_encoder(&fb->connector, &fb->encoder);
 	if (error != 0)
 		return (error);
@@ -924,11 +1024,13 @@ msmfb_probe(struct platform_device *pdev)
 		return (PTR_ERR(fb));
 	fb->disp = d;
 	spin_lock_init(&fb->lock);
-	fb->mdp = devm_platform_ioremap_resource(pdev, 0);
-	if (IS_ERR(fb->mdp))
-		return (PTR_ERR(fb->mdp));
-	fb->dp = fb->mdp + d->dp;
-	fb->mdp += d->mdp;
+	fb->mdss = devm_platform_ioremap_resource(pdev, 0);
+	if (IS_ERR(fb->mdss))
+		return (PTR_ERR(fb->mdss));
+	fb->dp = fb->mdss + d->dp;
+	fb->mdp = fb->mdss + d->mdp;
+	mutex_init(&fb->sink_lock);
+	INIT_WORK(&fb->hotplug_work, msmfb_hotplug_work);
 
 	/*
 	 * Take over only the pipeline we know: an interface that is running
@@ -947,6 +1049,7 @@ msmfb_probe(struct platform_device *pdev)
 	}
 
 	msmfb_probe_sink(fb);
+	(void)msmfb_update_sink(fb);
 	error = msmfb_kms_init(fb);
 	if (error != 0) {
 		drm_edid_free(fb->edid);
@@ -962,6 +1065,9 @@ msmfb_probe(struct platform_device *pdev)
 	error = drm_dev_register(&fb->drm, 0);
 	if (error != 0)
 		return (error);
+	/* Hotplug events, less the one the firmware's plug left pending. */
+	msmfb_dp_write(fb, DP_HPD_INT_ACK, DP_HPD_EVENTS);
+	msmfb_dp_write(fb, DP_HPD_INT_MASK, DP_HPD_EVENTS);
 	dev_info(&pdev->dev, "%ux%u display, scanning out %#x\n", fb->width,
 	    fb->height, fb->console_addr);
 	return (0);
@@ -972,6 +1078,8 @@ msmfb_remove(struct platform_device *pdev)
 {
 	struct msmfb *fb = platform_get_drvdata(pdev);
 
+	msmfb_dp_write(fb, DP_HPD_INT_MASK, 0);
+	cancel_work_sync(&fb->hotplug_work);
 	drm_dev_unplug(&fb->drm);
 	/* Disables the plane, which shows the console again. */
 	drm_atomic_helper_shutdown(&fb->drm);

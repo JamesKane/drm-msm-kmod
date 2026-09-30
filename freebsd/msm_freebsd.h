@@ -74,6 +74,7 @@ struct msm_fbsd_disp {
 	u32		intf;		/* the interface */
 	u32		ctl_flush_sspp;	/* the pipe's CTL_FLUSH bit */
 	u32		intr_vsync;	/* the interface's vsync, in MDP_INTR_* */
+	u32		mdss_intr_dp;	/* the DP controller, in MDSS_HW_INTR_* */
 };
 
 struct msm_fbsd_soc {

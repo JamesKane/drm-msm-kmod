@@ -130,6 +130,7 @@ static const struct msm_fbsd_disp sc8280xp_disp = {
 	.intf = 0x3a000,		/* INTF_6 */
 	.ctl_flush_sspp = 1u << 2,	/* VIG2 */
 	.intr_vsync = 1u << 17,		/* INTF_6 vsync, MDP_SSPP_TOP0_INTR */
+	.mdss_intr_dp = 1u << 14,	/* mdss0_dp2's interrupt */
 };
 
 static const struct msm_fbsd_pdev_desc sc8280xp_pdevs[] = {
