@@ -35,6 +35,10 @@
  * drives vblank.  With no client, the pipe shows the firmware framebuffer and
  * the console.
  *
+ * The DisplayPort controller's AUX channel reads the sink's capabilities and
+ * the monitor's EDID, which the connector reports.  Its transfers are polled:
+ * the DP controller's interrupts stay masked, as the firmware left them.
+ *
  * The firmware leaves the display's SMMU streams in bypass, so the pipe
  * fetches physical addresses, through 32-bit registers: buffers are
  * physically contiguous and below 4 GB.  They are write-combining, as the
@@ -67,7 +71,9 @@
 #include <drm/drm_atomic_state_helper.h>
 #include <drm/drm_connector.h>
 #include <drm/drm_crtc.h>
+#include <drm/display/drm_dp.h>
 #include <drm/drm_drv.h>
+#include <drm/drm_edid.h>
 #include <drm/drm_encoder.h>
 #include <drm/drm_file.h>
 #include <drm/drm_fourcc.h>
@@ -96,12 +102,37 @@
 #define	SSPP_SRC_YSTRIDE0	0x024
 #define	CTL_FLUSH		0x018
 
+/* DisplayPort controller registers, relative to the controller. */
+#define	DP_INTR_STATUS		0x020		/* AHB block */
+#define	DP_AUX_DATA		0x234		/* AUX block from here */
+#define	 DP_AUX_DATA_READ	(1u << 0)
+#define	 DP_AUX_DATA_INDEX_WRITE (1u << 31)
+#define	DP_AUX_TRANS_CTRL	0x238
+#define	 DP_AUX_TRANS_I2C	(1u << 8)
+#define	 DP_AUX_TRANS_GO	(1u << 9)
+#define	 DP_AUX_TRANS_NO_SEND_ADDR (1u << 10)
+#define	 DP_AUX_TRANS_NO_SEND_STOP (1u << 11)
+#define	DP_PHY_AUX_INTR_CLEAR	0x24c
+#define	DP_PHY_AUX_INTR_STATUS	0x2bc
+/*
+ * DP_INTR_STATUS has a status bit per event, and above each its
+ * acknowledge and mask bits.
+ */
+#define	DP_INTR_AUX_DONE	(1u << 3)
+#define	DP_INTR_AUX_FAILED	((1u << 6) | (1u << 9) | (1u << 12) | \
+				 (1u << 15) | (1u << 18) | (1u << 21) | \
+				 (1u << 27))
+#define	DP_AUX_TIMEOUT_US	250000
+#define	DP_EDID_ADDR		0x50
+
 extern struct vt_device *main_vd;
 
 struct msmfb {
 	struct drm_device		drm;
 	const struct msm_fbsd_disp	*disp;
 	void __iomem			*mdp;
+	void __iomem			*dp;
+	const struct drm_edid		*edid;		/* or NULL */
 	u32				console_addr;	/* the firmware's scanout */
 	u32				console_stride;
 	u_int				width, height;
@@ -166,6 +197,151 @@ msmfb_scanout(struct msmfb *fb, u32 addr, u32 stride)
 	msmfb_write(fb, d->sspp + SSPP_SRC_YSTRIDE0, (v & 0xffff0000) |
 	    (stride & 0xffff));
 	msmfb_write(fb, d->ctl + CTL_FLUSH, d->ctl_flush_sspp);
+}
+
+/* DisplayPort AUX channel */
+
+static inline u32
+msmfb_dp_read(struct msmfb *fb, u_int off)
+{
+	return (readl(fb->dp + off));
+}
+
+static inline void
+msmfb_dp_write(struct msmfb *fb, u_int off, u32 val)
+{
+	writel(val, fb->dp + off);
+}
+
+/*
+ * One AUX transaction, as msm's dp_aux.c does it: a native (DPCD) or I2C
+ * read or write of up to 16 bytes, polled.  An I2C write keeps the bus for
+ * the read that follows it.
+ */
+static int
+msmfb_aux(struct msmfb *fb, bool i2c, bool read, u32 addr, u8 *buf,
+    size_t len)
+{
+	u32 hdr[4], st, trans;
+	size_t i, n;
+	int us;
+
+	if (len == 0 || len > 16)
+		return (-EINVAL);
+	hdr[0] = ((addr >> 16) & 0xf) | (read ? 0x10 : 0);
+	hdr[1] = (addr >> 8) & 0xff;
+	hdr[2] = addr & 0xff;
+	hdr[3] = len - 1;
+	n = read ? 0 : len;
+	for (i = 0; i < n + 4; i++)
+		msmfb_dp_write(fb, DP_AUX_DATA,
+		    ((i < 4 ? hdr[i] : buf[i - 4]) << 8) |
+		    (i == 0 ? DP_AUX_DATA_INDEX_WRITE : 0));
+
+	msmfb_dp_write(fb, DP_AUX_TRANS_CTRL, 0);
+	(void)msmfb_dp_read(fb, DP_PHY_AUX_INTR_STATUS);
+	msmfb_dp_write(fb, DP_PHY_AUX_INTR_CLEAR, 0x1f);
+	msmfb_dp_write(fb, DP_PHY_AUX_INTR_CLEAR, 0x9f);
+	msmfb_dp_write(fb, DP_PHY_AUX_INTR_CLEAR, 0);
+	/* Acknowledge stale events; the masks stay clear. */
+	st = msmfb_dp_read(fb, DP_INTR_STATUS) &
+	    (DP_INTR_AUX_DONE | DP_INTR_AUX_FAILED);
+	msmfb_dp_write(fb, DP_INTR_STATUS, st << 1);
+
+	trans = DP_AUX_TRANS_GO;
+	if (i2c) {
+		trans |= DP_AUX_TRANS_I2C | DP_AUX_TRANS_NO_SEND_ADDR;
+		if (!read)
+			trans |= DP_AUX_TRANS_NO_SEND_STOP;
+	}
+	msmfb_dp_write(fb, DP_AUX_TRANS_CTRL, trans);
+
+	for (us = 0; us < DP_AUX_TIMEOUT_US; us += 20) {
+		st = msmfb_dp_read(fb, DP_INTR_STATUS) &
+		    (DP_INTR_AUX_DONE | DP_INTR_AUX_FAILED);
+		if (st != 0)
+			break;
+		DELAY(20);
+	}
+	msmfb_dp_write(fb, DP_INTR_STATUS, st << 1);
+	if (st == 0)
+		return (-ETIMEDOUT);
+	if ((st & DP_INTR_AUX_FAILED) != 0)
+		return (-EIO);
+	if (!read)
+		return (0);
+
+	/* The reply, from the FIFO's start; its first word is not data. */
+	msmfb_dp_write(fb, DP_AUX_TRANS_CTRL,
+	    msmfb_dp_read(fb, DP_AUX_TRANS_CTRL) & ~DP_AUX_TRANS_GO);
+	msmfb_dp_write(fb, DP_AUX_DATA, DP_AUX_DATA_INDEX_WRITE |
+	    DP_AUX_DATA_READ);
+	(void)msmfb_dp_read(fb, DP_AUX_DATA);
+	for (i = 0; i < len; i++)
+		buf[i] = (msmfb_dp_read(fb, DP_AUX_DATA) >> 8) & 0xff;
+	return (0);
+}
+
+/* The monitor's EDID, read through the sink's I2C bus, or NULL. */
+static const struct drm_edid *
+msmfb_read_edid(struct msmfb *fb)
+{
+	u8 *edid, off;
+	size_t len, pos;
+	int error;
+
+	len = EDID_LENGTH * 2;		/* the base block and one extension */
+	edid = kzalloc(len, GFP_KERNEL);
+	if (edid == NULL)
+		return (NULL);
+	for (pos = 0; pos < len; pos += 16) {
+		if (pos == EDID_LENGTH && edid[0x7e] == 0) {
+			len = EDID_LENGTH;
+			break;
+		}
+		off = pos;
+		error = msmfb_aux(fb, true, false, DP_EDID_ADDR, &off, 1);
+		if (error == 0)
+			error = msmfb_aux(fb, true, true, DP_EDID_ADDR,
+			    edid + pos, 16);
+		if (error != 0) {
+			dev_warn(fb->drm.dev, "EDID read at %zu failed: %d\n",
+			    pos, error);
+			kfree(edid);
+			return (NULL);
+		}
+	}
+	fb->edid = drm_edid_alloc(edid, len);
+	kfree(edid);
+	if (fb->edid != NULL && !drm_edid_valid(fb->edid)) {
+		dev_warn(fb->drm.dev, "the monitor's EDID is not valid\n");
+		drm_edid_free(fb->edid);
+		fb->edid = NULL;
+	}
+	return (fb->edid);
+}
+
+/* Report the sink and the monitor. */
+static void
+msmfb_probe_sink(struct msmfb *fb)
+{
+	u8 dpcd[16];
+	int error;
+
+	error = msmfb_aux(fb, false, true, DP_DPCD_REV, dpcd, sizeof(dpcd));
+	if (error != 0) {
+		dev_warn(fb->drm.dev, "DPCD read failed: %d\n", error);
+		return;
+	}
+	dev_info(fb->drm.dev, "DisplayPort %d.%d sink, up to %d lanes at "
+	    "%d.%02d Gb/s\n", dpcd[DP_DPCD_REV] >> 4, dpcd[DP_DPCD_REV] & 0xf,
+	    dpcd[DP_MAX_LANE_COUNT] & DP_MAX_LANE_COUNT_MASK,
+	    dpcd[DP_MAX_LINK_RATE] * 27 / 100,
+	    dpcd[DP_MAX_LINK_RATE] * 27 % 100);
+	if (msmfb_read_edid(fb) != NULL)
+		dev_info(fb->drm.dev, "monitor EDID read, %zu bytes\n",
+		    drm_edid_raw(fb->edid)->extensions != 0 ? (size_t)256 :
+		    (size_t)EDID_LENGTH);
 }
 
 /* GEM objects */
@@ -548,6 +724,8 @@ msmfb_connector_get_modes(struct drm_connector *connector)
 {
 	struct msmfb *fb = container_of(connector, struct msmfb, connector);
 
+	/* The monitor's identity; the mode stays the firmware's for now. */
+	drm_edid_connector_update(connector, fb->edid);
 	return (drm_connector_helper_get_modes_fixed(connector, &fb->mode));
 }
 
@@ -749,6 +927,7 @@ msmfb_probe(struct platform_device *pdev)
 	fb->mdp = devm_platform_ioremap_resource(pdev, 0);
 	if (IS_ERR(fb->mdp))
 		return (PTR_ERR(fb->mdp));
+	fb->dp = fb->mdp + d->dp;
 	fb->mdp += d->mdp;
 
 	/*
@@ -767,9 +946,12 @@ msmfb_probe(struct platform_device *pdev)
 		return (-ENODEV);
 	}
 
+	msmfb_probe_sink(fb);
 	error = msmfb_kms_init(fb);
-	if (error != 0)
+	if (error != 0) {
+		drm_edid_free(fb->edid);
 		return (error);
+	}
 	irq = platform_get_irq(pdev, 0);
 	if (irq < 0)
 		return (irq);
@@ -794,6 +976,8 @@ msmfb_remove(struct platform_device *pdev)
 	/* Disables the plane, which shows the console again. */
 	drm_atomic_helper_shutdown(&fb->drm);
 	msmfb_vsync_intr(fb, false);
+	drm_edid_free(fb->edid);
+	fb->edid = NULL;
 }
 
 static struct platform_driver msmfb_platform_driver = {
