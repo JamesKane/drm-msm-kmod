@@ -27,8 +27,8 @@
 
 /*
  * The Linux side of the glue: creates the platform devices msm's drivers
- * attach to (the GMU, the GPU and a headless "msm" DRM device) from the SoC
- * description.  Their interrupts are the ACPI device's, which LinuxKPI's
+ * attach to (the GMU, the GPU and a headless "msm" DRM device), and msmfb's
+ * display, from the SoC description.  Their interrupts are the ACPI device's, which LinuxKPI's
  * request_irq() finds by number.
  */
 
@@ -41,6 +41,9 @@
 #include <linux/sched.h>
 #include <linux/slab.h>
 
+#include <drm/drm_device.h>
+
+#include "msm_drv.h"
 #include "msm_freebsd.h"
 #include "msm_freebsd_bus.h"
 
@@ -59,6 +62,7 @@ const struct msm_fbsd_soc *msm_fbsd_soc;
 static device_t msm_fbsd_dev;
 static struct msm_fbsd_dev *msm_fbsd_fdevs[MSM_FBSD_MAX_PDEVS];
 static int msm_fbsd_nfdevs;
+static bool msm_fbsd_fb_registered;
 
 device_t
 msm_fbsd_bsddev(void)
@@ -156,6 +160,9 @@ msm_fbsd_linux_attach(device_t dev, int soc, struct qcom_smmu *smmu)
 	msm_fbsd_soc = msm_fbsd_socs[soc];
 	msm_fbsd_dev = dev;
 	msm_fbsd_iommu_set_smmu(smmu);
+	if ((error = msm_fbsd_fb_register()) != 0)
+		return (error);
+	msm_fbsd_fb_registered = true;
 
 	/* Suppliers first: the GMU, the GPU, then the DRM device. */
 	for (desc = msm_fbsd_soc->pdevs; desc->name != NULL; desc++)
@@ -180,6 +187,28 @@ msm_fbsd_linux_attach(device_t dev, int soc, struct qcom_smmu *smmu)
 	return (0);
 }
 
+/* Whether a DRM device of ours has files open. */
+bool
+msm_fbsd_linux_busy(void)
+{
+	struct msm_drm_private *priv;
+	struct platform_device *pdev;
+	int i;
+
+	for (i = 0; i < msm_fbsd_nfdevs; i++) {
+		pdev = &msm_fbsd_fdevs[i]->pdev;
+		if (strcmp(pdev->name, "msm") == 0) {
+			priv = platform_get_drvdata(pdev);
+			if (priv != NULL && priv->dev != NULL &&
+			    atomic_read(&priv->dev->open_count) > 0)
+				return (true);
+		} else if (strcmp(pdev->name, "msmfb") == 0 &&
+		    msm_fbsd_fb_busy(pdev))
+			return (true);
+	}
+	return (false);
+}
+
 void
 msm_fbsd_linux_detach(void)
 {
@@ -194,6 +223,10 @@ msm_fbsd_linux_detach(void)
 		platform_device_unregister(&fdev->pdev);
 		if (np != NULL)
 			np->pdev = NULL;
+	}
+	if (msm_fbsd_fb_registered) {
+		msm_fbsd_fb_unregister();
+		msm_fbsd_fb_registered = false;
 	}
 	msm_fbsd_iommu_set_smmu(NULL);
 	msm_fbsd_dev = NULL;

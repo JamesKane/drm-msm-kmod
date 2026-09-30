@@ -111,6 +111,26 @@ static const struct dev_pm_opp sc8280xp_gmu_opps[] = {
 	{ 0 }
 };
 
+/* The display: the MDP registers and the MDSS interrupt, for msmfb. */
+static const struct msm_fbsd_res sc8280xp_disp_res[] = {
+	{ "mdss", 0xae00000, 0x200000, 0 },
+	{ "mdss", 115, 0, 0 },		/* SPI 83; ACPI GPU0 interrupt 0 */
+	{ NULL }
+};
+
+/*
+ * The firmware scans out through source pipe VIG2, layer mixer 2, CTL 2 and
+ * interface 6, to DisplayPort controller 2 (Linux's dpu_8_0_sc8280xp.h).
+ */
+static const struct msm_fbsd_disp sc8280xp_disp = {
+	.mdp = 0x1000,
+	.sspp = 0x8000,			/* SSPP_VIG2 */
+	.ctl = 0x17000,			/* CTL_2 */
+	.intf = 0x3a000,		/* INTF_6 */
+	.ctl_flush_sspp = 1u << 2,	/* VIG2 */
+	.intr_vsync = 1u << 17,		/* INTF_6 vsync, MDP_SSPP_TOP0_INTR */
+};
+
 static const struct msm_fbsd_pdev_desc sc8280xp_pdevs[] = {
 	/*
 	 * The headless DRM device; its component is the GPU.  It sits under
@@ -129,6 +149,8 @@ static const struct msm_fbsd_pdev_desc sc8280xp_pdevs[] = {
 	   * SMMU fault resets the SoC.
 	   */
 	  .sid = { 0x5 }, .sid_mask = { 0xc00 }, .nsids = 1 },
+	/* The display the firmware set up; its SMMU streams are in bypass. */
+	{ .name = "msmfb", .res = sc8280xp_disp_res },
 	{ .name = NULL }
 };
 
@@ -138,4 +160,5 @@ const struct msm_fbsd_soc msm_fbsd_sc8280xp = {
 	.machine = &sc8280xp_machine,
 	.nodes = sc8280xp_nodes,
 	.pdevs = sc8280xp_pdevs,
+	.disp = &sc8280xp_disp,
 };

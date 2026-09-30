@@ -45,5 +45,6 @@ int	msm_fbsd_bus_irq(int gsiv, int acpi_rid);
 bool	msm_fbsd_linux_soc(int i, const char **pep_hid, uint64_t *gpucc_pa);
 int	msm_fbsd_linux_attach(device_t dev, int soc, struct qcom_smmu *smmu);
 void	msm_fbsd_linux_detach(void);
+bool	msm_fbsd_linux_busy(void);
 
 #endif

@@ -62,12 +62,26 @@ struct msm_fbsd_pdev_desc {
 	int				nsids;
 };
 
+/*
+ * The display pipeline the boot firmware leaves running, for msmfb: offsets
+ * in the display registers, and bits in their flush and interrupt registers.
+ */
+struct msm_fbsd_disp {
+	u32		mdp;		/* the MDP block */
+	u32		sspp;		/* the source pipe, from the MDP block */
+	u32		ctl;		/* its control path */
+	u32		intf;		/* the interface */
+	u32		ctl_flush_sspp;	/* the pipe's CTL_FLUSH bit */
+	u32		intr_vsync;	/* the interface's vsync, in MDP_INTR_* */
+};
+
 struct msm_fbsd_soc {
 	const char			*pep_hid;	/* ACPI \_SB.PEP0 */
 	u64				gpucc_pa;	/* in the GMU window */
 	struct device_node		*machine;
 	struct device_node		*nodes;		/* NULL name terminated */
 	const struct msm_fbsd_pdev_desc	*pdevs;		/* NULL name terminated */
+	const struct msm_fbsd_disp	*disp;		/* or NULL */
 };
 
 extern const struct msm_fbsd_soc *msm_fbsd_soc;
@@ -76,6 +90,11 @@ extern const struct msm_fbsd_soc msm_fbsd_sc8280xp;
 const struct msm_fbsd_pdev_desc *msm_fbsd_pdev_desc(struct device *dev);
 struct device;
 device_t msm_fbsd_bsddev(void);
+
+/* msm_freebsd_fb.c */
+int	msm_fbsd_fb_register(void);
+void	msm_fbsd_fb_unregister(void);
+bool	msm_fbsd_fb_busy(struct platform_device *pdev);
 
 /* msm_freebsd_iommu.c */
 struct qcom_smmu;

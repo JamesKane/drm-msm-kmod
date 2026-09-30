@@ -213,6 +213,9 @@ msm_fbsd_detach(device_t dev)
 {
 	struct msm_fbsd_softc *sc = device_get_softc(dev);
 
+	/* Closing files later would call into the unloaded module. */
+	if (msm_fbsd_linux_busy())
+		return (EBUSY);
 	msm_fbsd_linux_detach();
 	msm_fbsd_sc = NULL;
 	msm_fbsd_teardown(sc);
