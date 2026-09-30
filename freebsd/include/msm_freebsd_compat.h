@@ -62,15 +62,18 @@ struct fault_attr {
 #define	register_vmap_purge_notifier(nb)	((void)(nb), 0)
 #define	unregister_vmap_purge_notifier(nb)	((void)(nb), 0)
 
-/* PM QoS: no frequency constraints (there is no devfreq). */
+/* PM QoS: minimum frequencies, in kHz, which devfreq keeps to. */
 #define	DEV_PM_QOS_MIN_FREQUENCY	1
 #define	PM_QOS_MIN_FREQUENCY_DEFAULT_VALUE 0
 struct dev_pm_qos_request {
-	int	unused;
+	struct device	*dev;
+	s32		value;
+	struct dev_pm_qos_request *next;
 };
-#define	dev_pm_qos_add_request(dev, req, type, value)	((void)(req), 0)
-#define	dev_pm_qos_update_request(req, value)		((void)(req), 0)
-#define	dev_pm_qos_remove_request(req)			((void)(req), 0)
+int	dev_pm_qos_add_request(struct device *dev,
+	    struct dev_pm_qos_request *req, int type, s32 value);
+int	dev_pm_qos_update_request(struct dev_pm_qos_request *req, s32 value);
+int	dev_pm_qos_remove_request(struct dev_pm_qos_request *req);
 #define	DEVFREQ_TIMER_DELAYED				0
 
 /* No regulators on the supported boards; msm treats them as optional. */

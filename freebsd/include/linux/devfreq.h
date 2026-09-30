@@ -25,18 +25,21 @@
  * SUCH DAMAGE.
  */
 
-
-/* devfreq: not provided; msm runs the GPU at the GMU's chosen level. */
+/*
+ * devfreq: a device's frequency, scaled with its load by polling it under the
+ * simple_ondemand policy; enough of Linux's for msm's GPU.
+ */
 #ifndef _MSM_FREEBSD_LINUX_DEVFREQ_H_
 #define	_MSM_FREEBSD_LINUX_DEVFREQ_H_
 
 #include <linux/types.h>
 #include <linux/err.h>
-#include <linux/pm_opp.h>
+#include <linux/list.h>
 #include <linux/mutex.h>
+#include <linux/pm_opp.h>
+#include <linux/workqueue.h>
 
 struct device;
-struct devfreq;
 
 #define	DEVFREQ_GOV_SIMPLE_ONDEMAND	"simple_ondemand"
 #define	DEVFREQ_FLAG_LEAST_UPPER_BOUND	0x1
@@ -68,42 +71,25 @@ struct devfreq_simple_ondemand_data {
 
 struct devfreq {
 	struct devfreq_dev_profile *profile;
+	struct device	*dev;
+	struct mutex	lock;		/* the profile's callbacks; below */
 	unsigned long	previous_freq;
-	struct mutex	lock;
+	unsigned long	min_freq;	/* of the OPPs */
+	unsigned long	max_freq;
+	unsigned int	upthreshold;	/* busy %, to go to max_freq */
+	unsigned int	downdifferential; /* % below, to go down */
+	unsigned int	load;		/* busy % at the last poll */
+	bool		suspended;
+	struct delayed_work work;
+	struct list_head link;
 };
 
-static inline struct devfreq *
-devm_devfreq_add_device(struct device *dev __unused,
-    struct devfreq_dev_profile *profile __unused,
-    const char *governor __unused, void *data __unused)
-{
-	return (ERR_PTR(-ENODEV));
-}
-
-static inline struct dev_pm_opp *
-devfreq_recommended_opp(struct device *dev __unused,
-    unsigned long *freq __unused, u32 flags __unused)
-{
-	return (ERR_PTR(-ENODEV));
-}
-
-static inline int
-devfreq_suspend_device(struct devfreq *df __unused)
-{
-	return (0);
-}
-
-static inline int
-devfreq_resume_device(struct devfreq *df __unused)
-{
-	return (0);
-}
-
-static inline int
-devfreq_update_status(struct devfreq *df __unused,
-    unsigned long freq __unused)
-{
-	return (0);
-}
+struct devfreq *devm_devfreq_add_device(struct device *dev,
+	    struct devfreq_dev_profile *profile, const char *governor,
+	    void *data);
+struct dev_pm_opp *devfreq_recommended_opp(struct device *dev,
+	    unsigned long *freq, u32 flags);
+int	devfreq_suspend_device(struct devfreq *df);
+int	devfreq_resume_device(struct devfreq *df);
 
 #endif

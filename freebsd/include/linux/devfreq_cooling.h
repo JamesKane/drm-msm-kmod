@@ -35,11 +35,12 @@ struct devfreq;
 struct device_node;
 struct thermal_cooling_device;
 
+/* No thermal framework to cool through: no cooling device, and no error. */
 static inline struct thermal_cooling_device *
 of_devfreq_cooling_register(struct device_node *np __unused,
     struct devfreq *df __unused)
 {
-	return (ERR_PTR(-ENODEV));
+	return (NULL);
 }
 
 static inline void
