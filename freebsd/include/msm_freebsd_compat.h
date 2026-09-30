@@ -135,6 +135,9 @@ vmf_insert_pfn(struct vm_area_struct *vma, unsigned long addr,
 #include <linux/component.h>
 #include <linux/of.h>
 
+int	component_compare_of(struct device *dev, void *data);
+void	component_release_of(struct device *dev, void *data);
+
 static inline void
 drm_of_component_match_add(struct device *master,
     struct component_match **matchptr,
