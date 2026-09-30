@@ -333,7 +333,6 @@ msm_fbsd_linux_detach(void)
 			msm_fbsd_bus_irq_free(msm_fbsd_irqs[i].handle);
 			msm_fbsd_irqs[i].handler = NULL;
 		}
-	msm_fbsd_rpm_fini();
 	msm_fbsd_iommu_set_smmu(NULL);
 	msm_fbsd_dev = NULL;
 }

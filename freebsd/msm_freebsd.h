@@ -81,7 +81,5 @@ device_t msm_fbsd_bsddev(void);
 struct qcom_smmu;
 void	msm_fbsd_iommu_set_smmu(struct qcom_smmu *sc);
 
-/* msm_freebsd_power.c */
-void	msm_fbsd_rpm_fini(void);
 
 #endif
