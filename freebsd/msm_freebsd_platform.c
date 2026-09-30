@@ -26,8 +26,9 @@
  */
 
 /*
- * Linux platform devices, device tree lookups and components, as msm uses
- * them, for the devices msm_freebsd.c creates from the ACPI GPU device.
+ * Device tree lookups and components, as msm uses them, for the devices
+ * msm_freebsd.c creates from the ACPI GPU device.  The devices themselves
+ * are on LinuxKPI's platform bus.
  */
 
 #include <linux/device.h>
@@ -41,9 +42,6 @@
 
 #include "msm_freebsd.h"
 
-static DEFINE_MUTEX(msm_fbsd_lock);
-static struct platform_device *msm_fbsd_pdevs[MSM_FBSD_MAX_PDEVS];
-static struct platform_driver *msm_fbsd_drivers[8];
 
 /* Device tree */
 
@@ -227,7 +225,11 @@ of_address_to_resource(struct device_node *np, int index, struct resource *r)
 struct platform_device *
 of_find_device_by_node(struct device_node *np)
 {
-	return (np != NULL ? np->pdev : NULL);
+	/* As in Linux, with a reference the caller drops with put_device(). */
+	if (np == NULL || np->pdev == NULL)
+		return (NULL);
+	get_device(&np->pdev->dev);
+	return (np->pdev);
 }
 
 int
@@ -235,205 +237,6 @@ of_dma_configure(struct device *dev __unused, struct device_node *np __unused,
     bool force_dma __unused)
 {
 	return (0);
-}
-
-/* Platform devices and drivers */
-
-static bool
-msm_fbsd_driver_matches(struct platform_driver *drv,
-    struct platform_device *pdev)
-{
-	if (drv->driver.of_match_table != NULL)
-		return (pdev->dev.of_node != NULL &&
-		    of_match_node(drv->driver.of_match_table,
-		    pdev->dev.of_node) != NULL);
-	return (strcmp(drv->driver.name, pdev->name) == 0);
-}
-
-/*
- * Unbind a device from its driver, and release what the driver got with
- * devm_*() as Linux does after remove() or a failed probe().
- */
-static void
-msm_fbsd_release_driver(struct platform_device *pdev)
-{
-	lkpi_devres_release_free_list(&pdev->dev);
-	pdev->dev.driver = NULL;
-	pdev->bound = NULL;
-}
-
-/* Probe every unbound device a registered driver matches. */
-static void
-msm_fbsd_probe_all(void)
-{
-	struct platform_device *pdev;
-	struct platform_driver *drv;
-	int d, i, error;
-
-	for (i = 0; i < nitems(msm_fbsd_pdevs); i++) {
-		pdev = msm_fbsd_pdevs[i];
-		if (pdev == NULL || pdev->bound != NULL)
-			continue;
-		for (d = 0; d < nitems(msm_fbsd_drivers); d++) {
-			drv = msm_fbsd_drivers[d];
-			if (drv == NULL || drv->probe == NULL ||
-			    !msm_fbsd_driver_matches(drv, pdev))
-				continue;
-			pdev->dev.driver = &drv->driver;
-			pdev->bound = drv;
-			error = drv->probe(pdev);
-			if (error != 0) {
-				device_printf(pdev->dev.bsddev, "%s: probe of "
-				    "%s failed: %d\n", pdev->name,
-				    drv->driver.name, error);
-				msm_fbsd_release_driver(pdev);
-			}
-			break;
-		}
-	}
-}
-
-int
-platform_driver_register(struct platform_driver *pdrv)
-{
-	int d;
-
-	mutex_lock(&msm_fbsd_lock);
-	for (d = 0; d < nitems(msm_fbsd_drivers); d++) {
-		if (msm_fbsd_drivers[d] == NULL) {
-			msm_fbsd_drivers[d] = pdrv;
-			break;
-		}
-	}
-	mutex_unlock(&msm_fbsd_lock);
-	if (d == nitems(msm_fbsd_drivers))
-		return (-ENOSPC);
-	msm_fbsd_probe_all();
-	return (0);
-}
-
-void
-platform_driver_unregister(struct platform_driver *pdrv)
-{
-	struct platform_device *pdev;
-	int d, i;
-
-	for (i = 0; i < nitems(msm_fbsd_pdevs); i++) {
-		pdev = msm_fbsd_pdevs[i];
-		if (pdev != NULL && pdev->bound == pdrv) {
-			if (pdrv->remove != NULL)
-				pdrv->remove(pdev);
-			msm_fbsd_release_driver(pdev);
-		}
-	}
-	mutex_lock(&msm_fbsd_lock);
-	for (d = 0; d < nitems(msm_fbsd_drivers); d++)
-		if (msm_fbsd_drivers[d] == pdrv)
-			msm_fbsd_drivers[d] = NULL;
-	mutex_unlock(&msm_fbsd_lock);
-}
-
-/* Add a device the glue created, and probe it if a driver matches. */
-int
-msm_fbsd_pdev_add(struct platform_device *pdev)
-{
-	int i;
-
-	mutex_lock(&msm_fbsd_lock);
-	for (i = 0; i < nitems(msm_fbsd_pdevs); i++) {
-		if (msm_fbsd_pdevs[i] == NULL) {
-			msm_fbsd_pdevs[i] = pdev;
-			break;
-		}
-	}
-	mutex_unlock(&msm_fbsd_lock);
-	if (i == nitems(msm_fbsd_pdevs))
-		return (ENOSPC);
-	if (pdev->dev.of_node != NULL)
-		pdev->dev.of_node->pdev = pdev;
-	msm_fbsd_probe_all();
-	return (0);
-}
-
-void
-msm_fbsd_pdev_del(struct platform_device *pdev)
-{
-	int i;
-
-	if (pdev->bound != NULL) {
-		if (pdev->bound->remove != NULL)
-			pdev->bound->remove(pdev);
-		msm_fbsd_release_driver(pdev);
-	}
-	if (pdev->dev.of_node != NULL)
-		pdev->dev.of_node->pdev = NULL;
-	mutex_lock(&msm_fbsd_lock);
-	for (i = 0; i < nitems(msm_fbsd_pdevs); i++)
-		if (msm_fbsd_pdevs[i] == pdev)
-			msm_fbsd_pdevs[i] = NULL;
-	mutex_unlock(&msm_fbsd_lock);
-}
-
-struct platform_device *
-platform_device_register_full(const struct platform_device_info *info)
-{
-	/* Only used for i.MX5's headless GPU. */
-	return (ERR_PTR(-ENODEV));
-}
-
-struct resource *
-platform_get_resource(struct platform_device *pdev, unsigned int type,
-    unsigned int num)
-{
-	u32 i;
-
-	for (i = 0; i < pdev->num_resources; i++)
-		if (resource_type(&pdev->resource[i]) == type && num-- == 0)
-			return (&pdev->resource[i]);
-	return (NULL);
-}
-
-struct resource *
-platform_get_resource_byname(struct platform_device *pdev, unsigned int type,
-    const char *name)
-{
-	u32 i;
-
-	for (i = 0; i < pdev->num_resources; i++)
-		if (resource_type(&pdev->resource[i]) == type &&
-		    pdev->resource[i].name != NULL &&
-		    strcmp(pdev->resource[i].name, name) == 0)
-			return (&pdev->resource[i]);
-	return (NULL);
-}
-
-int
-platform_get_irq(struct platform_device *pdev, unsigned int num)
-{
-	struct resource *r;
-
-	r = platform_get_resource(pdev, IORESOURCE_IRQ, num);
-	return (r != NULL ? (int)r->start : -ENXIO);
-}
-
-int
-platform_get_irq_byname(struct platform_device *pdev, const char *name)
-{
-	struct resource *r;
-
-	r = platform_get_resource_byname(pdev, IORESOURCE_IRQ, name);
-	return (r != NULL ? (int)r->start : -ENXIO);
-}
-
-void __iomem *
-devm_ioremap_resource(struct device *dev, const struct resource *res)
-{
-	void __iomem *p;
-
-	if (res == NULL)
-		return (IOMEM_ERR_PTR(-EINVAL));
-	p = devm_ioremap(dev, res->start, resource_size(res));
-	return (p != NULL ? p : IOMEM_ERR_PTR(-ENOMEM));
 }
 
 /* Components: one master, bound once all its components are added. */

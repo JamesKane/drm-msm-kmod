@@ -81,8 +81,6 @@ struct regulator;
 #define	regulator_enable(r)		((void)(r), 0)
 #define	regulator_disable(r)		((void)(r), 0)
 
-void __iomem	*devm_ioremap_resource(struct device *dev,
-		    const struct resource *res);
 
 #include <linux/iopoll.h>
 #include <linux/sizes.h>

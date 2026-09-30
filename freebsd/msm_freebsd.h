@@ -73,8 +73,6 @@ struct msm_fbsd_soc {
 extern const struct msm_fbsd_soc *msm_fbsd_soc;
 extern const struct msm_fbsd_soc msm_fbsd_sc8280xp;
 
-int	msm_fbsd_pdev_add(struct platform_device *pdev);
-void	msm_fbsd_pdev_del(struct platform_device *pdev);
 const struct msm_fbsd_pdev_desc *msm_fbsd_pdev_desc(struct device *dev);
 struct device;
 device_t msm_fbsd_bsddev(void);
