@@ -1007,7 +1007,7 @@ void msm_gpu_cleanup(struct msm_gpu *gpu)
 	 * Each submit arms the hangcheck timer and nothing else stops it; it
 	 * must not fire on the rings, worker or gpu freed below.
 	 */
-	timer_delete_sync(&gpu->hangcheck_timer);
+	timer_shutdown_sync(&gpu->hangcheck_timer);
 
 	for (i = 0; i < ARRAY_SIZE(gpu->rb); i++) {
 		msm_ringbuffer_destroy(gpu->rb[i]);
