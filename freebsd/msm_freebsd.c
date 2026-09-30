@@ -28,8 +28,8 @@
 /*
  * The Linux side of the glue: creates the platform devices msm's drivers
  * attach to (the GMU, the GPU and a headless "msm" DRM device) from the SoC
- * description, and provides Linux's request_irq() for them on top of
- * msm_freebsd_bus.c.
+ * description.  Their interrupts are the ACPI device's, which LinuxKPI's
+ * request_irq() finds by number.
  */
 
 #include <linux/device.h>
@@ -50,12 +50,6 @@ struct msm_fbsd_dev {
 	struct resource			res[8];
 };
 
-static struct msm_fbsd_irq {
-	unsigned int	irq;		/* the GSIV */
-	irq_handler_t	handler;
-	void		*arg;
-	int		handle;		/* msm_freebsd_bus.c's */
-} msm_fbsd_irqs[MSM_FBSD_MAX_IRQS];
 
 static const struct msm_fbsd_soc *const msm_fbsd_socs[] = {
 	&msm_fbsd_sc8280xp,
@@ -94,139 +88,6 @@ msm_fbsd_linux_soc(int i, const char **pep_hid, uint64_t *gpucc_pa)
 	return (true);
 }
 
-/* Interrupts */
-
-static void
-msm_fbsd_intr(void *arg)
-{
-	struct msm_fbsd_irq *irq = arg;
-
-	linux_set_current(curthread);
-	(void)irq->handler(irq->irq, irq->arg);
-}
-
-/* The interrupt's entry in the SoC description, or NULL. */
-static const struct msm_fbsd_res *
-msm_fbsd_irq_res(unsigned int irqno)
-{
-	const struct msm_fbsd_res *r;
-	int i;
-
-	for (i = 0; i < msm_fbsd_nfdevs; i++)
-		for (r = msm_fbsd_fdevs[i]->desc->res; r != NULL &&
-		    r->name != NULL; r++)
-			if (r->size == 0 && r->start == irqno)
-				return (r);
-	return (NULL);
-}
-
-int
-msm_fbsd_request_irq(struct device *dev __unused, unsigned int irqno,
-    irq_handler_t handler, unsigned long flags, const char *name __unused,
-    void *arg)
-{
-	const struct msm_fbsd_res *r;
-	struct msm_fbsd_irq *irq;
-	int i, h;
-
-	if ((r = msm_fbsd_irq_res(irqno)) == NULL)
-		return (-ENXIO);
-	for (i = 0; i < MSM_FBSD_MAX_IRQS; i++)
-		if (msm_fbsd_irqs[i].handler == NULL)
-			break;
-	if (i == MSM_FBSD_MAX_IRQS)
-		return (-ENOSPC);
-	irq = &msm_fbsd_irqs[i];
-	irq->irq = irqno;
-	irq->handler = handler;
-	irq->arg = arg;
-	h = msm_fbsd_bus_irq_alloc(irqno, r->acpi_rid, msm_fbsd_intr, irq,
-	    (flags & IRQF_NO_AUTOEN) == 0);
-	if (h < 0) {
-		irq->handler = NULL;
-		return (h);
-	}
-	irq->handle = h;
-	return (0);
-}
-
-struct msm_fbsd_devm_irq {
-	unsigned int	irq;
-	void		*arg;
-};
-
-static void
-msm_fbsd_devm_irq_release(struct device *dev __unused, void *res)
-{
-	struct msm_fbsd_devm_irq *dr = res;
-
-	msm_fbsd_free_irq(dr->irq, dr->arg);
-}
-
-/* request_irq() whose interrupt is freed with the device's devres. */
-int
-msm_fbsd_devm_request_irq(struct device *dev, unsigned int irqno,
-    irq_handler_t handler, unsigned long flags, const char *name, void *arg)
-{
-	struct msm_fbsd_devm_irq *dr;
-	int error;
-
-	dr = devres_alloc(msm_fbsd_devm_irq_release, sizeof(*dr), GFP_KERNEL);
-	if (dr == NULL)
-		return (-ENOMEM);
-	error = msm_fbsd_request_irq(dev, irqno, handler, flags, name, arg);
-	if (error != 0) {
-		devres_free(dr);
-		return (error);
-	}
-	dr->irq = irqno;
-	dr->arg = arg;
-	devres_add(dev, dr);
-	return (0);
-}
-
-static struct msm_fbsd_irq *
-msm_fbsd_irq_find(unsigned int irqno, void *arg)
-{
-	int i;
-
-	for (i = 0; i < MSM_FBSD_MAX_IRQS; i++)
-		if (msm_fbsd_irqs[i].handler != NULL &&
-		    msm_fbsd_irqs[i].irq == irqno &&
-		    (arg == NULL || msm_fbsd_irqs[i].arg == arg))
-			return (&msm_fbsd_irqs[i]);
-	return (NULL);
-}
-
-void
-msm_fbsd_free_irq(unsigned int irqno, void *arg)
-{
-	struct msm_fbsd_irq *irq;
-
-	if ((irq = msm_fbsd_irq_find(irqno, arg)) == NULL)
-		return;
-	msm_fbsd_bus_irq_free(irq->handle);
-	irq->handler = NULL;
-}
-
-void
-msm_fbsd_enable_irq(unsigned int irqno)
-{
-	struct msm_fbsd_irq *irq;
-
-	if ((irq = msm_fbsd_irq_find(irqno, NULL)) != NULL)
-		(void)msm_fbsd_bus_irq_enable(irq->handle);
-}
-
-void
-msm_fbsd_disable_irq(unsigned int irqno)
-{
-	struct msm_fbsd_irq *irq;
-
-	if ((irq = msm_fbsd_irq_find(irqno, NULL)) != NULL)
-		msm_fbsd_bus_irq_disable(irq->handle);
-}
-
 /* Platform devices */
 
 static void
@@ -243,7 +104,7 @@ msm_fbsd_dev_create(device_t dev, const struct msm_fbsd_pdev_desc *desc)
 	struct device_node *np;
 	const struct msm_fbsd_res *r;
 	struct device *ldev;
-	int n;
+	int irq, n;
 
 	fdev = kzalloc(sizeof(*fdev), GFP_KERNEL);
 	fdev->desc = desc;
@@ -256,12 +117,18 @@ msm_fbsd_dev_create(device_t dev, const struct msm_fbsd_pdev_desc *desc)
 	for (n = 0, r = desc->res; r != NULL && r->name != NULL &&
 	    n < nitems(fdev->res); r++, n++) {
 		fdev->res[n].name = r->name;
-		fdev->res[n].start = r->start;
 		if (r->size != 0) {
+			fdev->res[n].start = r->start;
 			fdev->res[n].end = r->start + r->size - 1;
 			fdev->res[n].flags = IORESOURCE_MEM;
 		} else {
-			fdev->res[n].end = r->start;
+			/* The FreeBSD interrupt number of the GSIV. */
+			irq = msm_fbsd_bus_irq(r->start, r->acpi_rid);
+			if (irq < 0) {
+				kfree(fdev);
+				return (NULL);
+			}
+			fdev->res[n].start = fdev->res[n].end = irq;
 			fdev->res[n].flags = IORESOURCE_IRQ;
 		}
 	}
@@ -295,6 +162,8 @@ msm_fbsd_linux_attach(device_t dev, int soc, struct qcom_smmu *smmu)
 		;
 	while (desc-- != msm_fbsd_soc->pdevs) {
 		fdev = msm_fbsd_dev_create(dev, desc);
+		if (fdev == NULL)
+			return (-ENXIO);
 		/* of_find_device_by_node() finds it, even from probe(). */
 		if (fdev->pdev.dev.of_node != NULL)
 			fdev->pdev.dev.of_node->pdev = &fdev->pdev;
@@ -316,7 +185,6 @@ msm_fbsd_linux_detach(void)
 {
 	struct msm_fbsd_dev *fdev;
 	struct device_node *np;
-	int i;
 
 	linux_set_current(curthread);
 	while (msm_fbsd_nfdevs > 0) {
@@ -327,12 +195,6 @@ msm_fbsd_linux_detach(void)
 		if (np != NULL)
 			np->pdev = NULL;
 	}
-	/* Interrupts requested with request_irq() but never freed. */
-	for (i = 0; i < MSM_FBSD_MAX_IRQS; i++)
-		if (msm_fbsd_irqs[i].handler != NULL) {
-			msm_fbsd_bus_irq_free(msm_fbsd_irqs[i].handle);
-			msm_fbsd_irqs[i].handler = NULL;
-		}
 	msm_fbsd_iommu_set_smmu(NULL);
 	msm_fbsd_dev = NULL;
 }

@@ -60,14 +60,6 @@ SYSCTL_NODE(_hw, OID_AUTO, msm, CTLFLAG_RW | CTLFLAG_MPSAFE, 0,
 
 #define	MSM_FBSD_EXTRA_RID	16		/* for interrupts not in ACPI */
 
-struct msm_fbsd_irq {
-	int		rid;
-	struct resource	*res;
-	void		*cookie;	/* set while enabled */
-	void		(*fn)(void *);
-	void		*arg;
-};
-
 static struct msm_fbsd_softc {
 	device_t		dev;
 	struct resource		*gmu_res;
@@ -77,87 +69,34 @@ static struct msm_fbsd_softc {
 	int			next_rid;
 	int			soc;		/* msm_fbsd_linux_soc() index */
 	uint64_t		gpucc_pa;
-	struct msm_fbsd_irq	irqs[MSM_FBSD_MAX_IRQS];
 } *msm_fbsd_sc;
 
 /* Interrupts */
 
+/*
+ * The FreeBSD interrupt number of a GPU interrupt, which the glue gives its
+ * platform device for LinuxKPI's request_irq().  ACPI lists most, at
+ * acpi_rid; the others are added by GSIV, which maps them.
+ */
 int
-msm_fbsd_bus_irq_alloc(int gsiv, int acpi_rid, void (*fn)(void *), void *arg,
-    bool enable)
+msm_fbsd_bus_irq(int gsiv, int acpi_rid)
 {
 	struct msm_fbsd_softc *sc = msm_fbsd_sc;
-	struct msm_fbsd_irq *irq;
-	int h, error;
+	rman_res_t start, count;
+	int rid;
 
 	if (sc == NULL)
 		return (-ENXIO);
-	for (h = 0; h < MSM_FBSD_MAX_IRQS; h++)
-		if (sc->irqs[h].fn == NULL)
-			break;
-	if (h == MSM_FBSD_MAX_IRQS)
-		return (-ENOSPC);
-	irq = &sc->irqs[h];
 	if (acpi_rid >= 0)
-		irq->rid = acpi_rid;
+		rid = acpi_rid;
 	else {
-		/* ACPI does not list it; add it by its GSIV. */
-		irq->rid = sc->next_rid++;
-		bus_set_resource(sc->dev, SYS_RES_IRQ, irq->rid, gsiv, 1);
+		rid = sc->next_rid++;
+		if (bus_set_resource(sc->dev, SYS_RES_IRQ, rid, gsiv, 1) != 0)
+			return (-ENXIO);
 	}
-	irq->res = bus_alloc_resource_any(sc->dev, SYS_RES_IRQ, &irq->rid,
-	    RF_ACTIVE);
-	if (irq->res == NULL)
+	if (bus_get_resource(sc->dev, SYS_RES_IRQ, rid, &start, &count) != 0)
 		return (-ENXIO);
-	irq->fn = fn;
-	irq->arg = arg;
-	irq->cookie = NULL;
-	if (enable && (error = msm_fbsd_bus_irq_enable(h)) != 0) {
-		msm_fbsd_bus_irq_free(h);
-		return (error);
-	}
-	return (h);
-}
-
-void
-msm_fbsd_bus_irq_free(int h)
-{
-	struct msm_fbsd_softc *sc = msm_fbsd_sc;
-	struct msm_fbsd_irq *irq;
-
-	if (sc == NULL || h < 0 || h >= MSM_FBSD_MAX_IRQS)
-		return;
-	irq = &sc->irqs[h];
-	msm_fbsd_bus_irq_disable(h);
-	if (irq->res != NULL)
-		bus_release_resource(sc->dev, SYS_RES_IRQ, irq->rid, irq->res);
-	irq->res = NULL;
-	irq->fn = NULL;
-}
-
-int
-msm_fbsd_bus_irq_enable(int h)
-{
-	struct msm_fbsd_softc *sc = msm_fbsd_sc;
-	struct msm_fbsd_irq *irq = &sc->irqs[h];
-
-	if (irq->cookie != NULL)
-		return (0);
-	return (-bus_setup_intr(sc->dev, irq->res, INTR_TYPE_MISC |
-	    INTR_MPSAFE, NULL, irq->fn, irq->arg, &irq->cookie));
-}
-
-/* Like Linux's disable_irq(): waits for a running handler. */
-void
-msm_fbsd_bus_irq_disable(int h)
-{
-	struct msm_fbsd_softc *sc = msm_fbsd_sc;
-	struct msm_fbsd_irq *irq = &sc->irqs[h];
-
-	if (irq->cookie == NULL)
-		return;
-	bus_teardown_intr(sc->dev, irq->res, irq->cookie);
-	irq->cookie = NULL;
+	return ((int)start);
 }
 
 /* ACPI GPU device */

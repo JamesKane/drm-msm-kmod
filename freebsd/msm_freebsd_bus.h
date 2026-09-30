@@ -37,14 +37,9 @@
 
 struct qcom_smmu;
 
-#define	MSM_FBSD_MAX_IRQS	4
 
 /* msm_freebsd_bus.c */
-int	msm_fbsd_bus_irq_alloc(int gsiv, int acpi_rid, void (*fn)(void *),
-	    void *arg, bool enable);
-void	msm_fbsd_bus_irq_free(int handle);
-int	msm_fbsd_bus_irq_enable(int handle);
-void	msm_fbsd_bus_irq_disable(int handle);
+int	msm_fbsd_bus_irq(int gsiv, int acpi_rid);
 
 /* msm_freebsd.c: create and delete the platform devices. */
 bool	msm_fbsd_linux_soc(int i, const char **pep_hid, uint64_t *gpucc_pa);

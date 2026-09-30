@@ -48,8 +48,6 @@
 struct device;
 struct notifier_block;
 
-#define	IRQF_TRIGGER_RISING	0x00000001
-#define	IRQF_TRIGGER_HIGH	0x00000004
 
 /* Fault injection: never inject. */
 struct fault_attr {
@@ -89,7 +87,6 @@ struct regulator;
 /* msm's module parameters live under hw.msm (declared in msm_freebsd_bus.c). */
 SYSCTL_DECL(_hw_msm);
 
-#define	IRQF_NO_AUTOEN		0x00080000
 
 /* Device links: the glue powers the GMU and GPU in the right order. */
 #define	DL_FLAG_STATELESS	0x0001
@@ -153,24 +150,6 @@ drm_of_component_match_add(struct device *master,
 	for ((child) = NULL; (child) != NULL; )
 
 
-/* Interrupts of the glue's platform devices (msm_freebsd.c). */
-int	msm_fbsd_request_irq(struct device *dev, unsigned int irq,
-	    irq_handler_t handler, unsigned long flags, const char *name,
-	    void *arg);
-int	msm_fbsd_devm_request_irq(struct device *dev, unsigned int irq,
-	    irq_handler_t handler, unsigned long flags, const char *name,
-	    void *arg);
-void	msm_fbsd_free_irq(unsigned int irq, void *arg);
-void	msm_fbsd_enable_irq(unsigned int irq);
-void	msm_fbsd_disable_irq(unsigned int irq);
-#define	request_irq(irq, handler, flags, name, arg)			\
-	msm_fbsd_request_irq(NULL, (irq), (handler), (flags), (name), (arg))
-#define	devm_request_irq(dev, irq, handler, flags, name, arg)		\
-	msm_fbsd_devm_request_irq((dev), (irq), (handler), (flags), (name), \
-	    (arg))
-#define	free_irq(irq, arg)	msm_fbsd_free_irq((irq), (arg))
-#define	enable_irq(irq)		msm_fbsd_enable_irq(irq)
-#define	disable_irq(irq)	msm_fbsd_disable_irq(irq)
 
 /* LinuxKPI's device.h says no device is behind an IOMMU. */
 bool	msm_fbsd_device_iommu_mapped(struct device *dev);
