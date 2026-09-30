@@ -42,7 +42,8 @@
  * timing are set, all as msm works them out; and the link comes back on, is
  * trained, and carries the stream the interface starts again.  The firmware's
  * registers are kept, to put its mode back for the console when the client
- * goes.
+ * goes.  With the CRTC inactive (DPMS off) the stream stops the same way,
+ * and the monitor goes to sleep.
  *
  * The DisplayPort controller's AUX channel reads the sink's capabilities and
  * the monitor's EDID, which the connector reports.  Its transfers are polled,
@@ -255,6 +256,7 @@ struct msmfb {
 	struct msmfb_timing		fw_timing;
 	struct drm_display_mode		fw_mode;
 	struct drm_display_mode		hw_mode;	/* what the timing is */
+	bool				output_off;	/* by DPMS */
 	struct drm_plane		plane;
 	struct drm_crtc			crtc;
 	struct drm_encoder		encoder;
@@ -820,7 +822,8 @@ msmfb_hotplug_work(struct work_struct *work)
 
 	mutex_lock(&fb->sink_lock);
 	changed = msmfb_update_sink(fb);
-	if (fb->connected) {
+	/* An output that is off is trained when it goes on. */
+	if (fb->connected && !READ_ONCE(fb->output_off)) {
 		(void)msmfb_link_train(fb);
 		msmfb_check_link(fb);
 	}
@@ -1054,24 +1057,16 @@ msmfb_compute_timing(struct msmfb *fb, const struct drm_display_mode *m,
 }
 
 /*
- * Change the stream over, as msm's DPU encoder and DP bridge do when they
- * are disabled and enabled again, less the PHY and the link clocks, which
- * stay up; with sink_lock held.
+ * Stop the stream, as msm disables its output: the link idles, at the end of
+ * a frame of the stream; the interface stops, at its next vsync; the link
+ * goes off.  The PHY and the link clocks stay up.  With sink_lock held.
  */
 static void
-msmfb_write_timing(struct msmfb *fb, const struct msmfb_timing *t)
+msmfb_stream_off(struct msmfb *fb)
 {
 	const struct msm_fbsd_disp *d = fb->disp;
-	void __iomem *rcg = fb->mdss + d->dp_pixel_rcg;
-	unsigned long flags;
 	u_int i, frame_ms;
-	u32 ml;
 
-	/*
-	 * As msm disables the output: the link idles, at the end of a frame
-	 * of the stream; the interface stops, at its next vsync; the link
-	 * goes off.
-	 */
 	frame_ms = 1000 / max(drm_mode_vrefresh(&fb->hw_mode), 10) + 1;
 	msmfb_dp_write(fb, DP_INTR_STATUS2, msmfb_dp_read(fb, DP_INTR_STATUS2) |
 	    DP_INTR_IDLE_PATTERN_SENT << 1);
@@ -1085,8 +1080,16 @@ msmfb_write_timing(struct msmfb *fb, const struct msmfb_timing *t)
 	    DP_INTR_IDLE_PATTERN_SENT << 1);
 	msmfb_write(fb, d->intf + INTF_TIMING_ENGINE_EN, 0);
 	msleep(2 * frame_ms);
-	ml = msmfb_dp_read(fb, DP_MAINLINK_CTRL);
-	msmfb_dp_write(fb, DP_MAINLINK_CTRL, ml & ~DP_MAINLINK_ENABLE);
+	msmfb_dp_write(fb, DP_MAINLINK_CTRL, msmfb_dp_read(fb, DP_MAINLINK_CTRL) &
+	    ~DP_MAINLINK_ENABLE);
+}
+
+/* Set a timing, with the stream stopped. */
+static void
+msmfb_load_timing(struct msmfb *fb, const struct msmfb_timing *t)
+{
+	void __iomem *rcg = fb->mdss + fb->disp->dp_pixel_rcg;
+	u_int i;
 
 	for (i = 0; i < nitems(msmfb_timing_regs); i++)
 		writel(*msmfb_treg_field(__DECONST(struct msmfb_timing *, t),
@@ -1098,13 +1101,23 @@ msmfb_write_timing(struct msmfb *fb, const struct msmfb_timing *t)
 		udelay(1);
 	if (i == 500)
 		dev_warn(fb->drm.dev, "the pixel clock didn't change\n");
+}
 
-	/*
-	 * The link on again, reset, as msm_dp_catalog_ctrl_mainlink_ctrl()
-	 * has it, and trained, which leaves it sending the stream; then the
-	 * interface with its settings flushed in.
-	 */
-	ml &= ~(DP_MAINLINK_ENABLE | DP_MAINLINK_RESET);
+/*
+ * Start the stream, as msm enables its output: the link on, reset, as
+ * msm_dp_catalog_ctrl_mainlink_ctrl() has it, and trained, which leaves it
+ * sending the stream; then the interface with its settings flushed in.
+ * With sink_lock held.
+ */
+static void
+msmfb_stream_on(struct msmfb *fb)
+{
+	const struct msm_fbsd_disp *d = fb->disp;
+	unsigned long flags;
+	u32 ml;
+
+	ml = msmfb_dp_read(fb, DP_MAINLINK_CTRL) &
+	    ~(DP_MAINLINK_ENABLE | DP_MAINLINK_RESET);
 	msmfb_dp_write(fb, DP_MAINLINK_CTRL, ml);
 	msmfb_dp_write(fb, DP_MAINLINK_CTRL, ml | DP_MAINLINK_RESET);
 	msmfb_dp_write(fb, DP_MAINLINK_CTRL, ml);
@@ -1130,6 +1143,10 @@ msmfb_link_ok(struct msmfb *fb)
 	    sizeof(st)) == 0 && drm_dp_channel_eq_ok(st, fb->lanes));
 }
 
+/*
+ * Change the stream over, as msm's DPU encoder and DP bridge do when they are
+ * disabled and enabled again; with the output off, only set its timing.
+ */
 static void
 msmfb_set_mode(struct msmfb *fb, const struct drm_display_mode *mode)
 {
@@ -1145,13 +1162,56 @@ msmfb_set_mode(struct msmfb *fb, const struct drm_display_mode *mode)
 	else
 		msmfb_compute_timing(fb, mode, &t);
 	mutex_lock(&fb->sink_lock);
-	msmfb_write_timing(fb, &t);
-	if (fb->connected && !msmfb_link_ok(fb))
-		dev_info(fb->drm.dev, "link not locked after mode change\n");
+	if (fb->output_off)
+		msmfb_load_timing(fb, &t);
+	else {
+		msmfb_stream_off(fb);
+		msmfb_load_timing(fb, &t);
+		msmfb_stream_on(fb);
+		if (fb->connected && !msmfb_link_ok(fb))
+			dev_info(fb->drm.dev,
+			    "link not locked after mode change\n");
+	}
 	mutex_unlock(&fb->sink_lock);
 	drm_mode_copy(&fb->hw_mode, mode);
 	mutex_unlock(&fb->mode_lock);
 	dev_info(fb->drm.dev, "mode " DRM_MODE_FMT "\n", DRM_MODE_ARG(mode));
+}
+
+/*
+ * Turn the output off or on (DPMS): with no stream, the monitor goes to
+ * sleep.
+ */
+static void
+msmfb_output(struct msmfb *fb, bool on)
+{
+	mutex_lock(&fb->mode_lock);
+	if (fb->output_off == !on) {
+		mutex_unlock(&fb->mode_lock);
+		return;
+	}
+	mutex_lock(&fb->sink_lock);
+	if (on)
+		msmfb_stream_on(fb);
+	else
+		msmfb_stream_off(fb);
+	WRITE_ONCE(fb->output_off, !on);
+	mutex_unlock(&fb->sink_lock);
+	mutex_unlock(&fb->mode_lock);
+	dev_info(fb->drm.dev, "output %s\n", on ? "on" : "off");
+}
+
+/* Show the console: the firmware's mode and framebuffer, the output on. */
+static void
+msmfb_show_console(struct msmfb *fb)
+{
+	unsigned long flags;
+
+	msmfb_set_mode(fb, &fb->fw_mode);
+	msmfb_output(fb, true);
+	spin_lock_irqsave(&fb->lock, flags);
+	msmfb_scanout(fb, fb->console_addr, fb->console_stride);
+	spin_unlock_irqrestore(&fb->lock, flags);
 }
 
 /* GEM objects */
@@ -1521,6 +1581,7 @@ msmfb_crtc_atomic_flush(struct drm_crtc *crtc, struct drm_atomic_state *state)
 static void
 msmfb_crtc_atomic_enable(struct drm_crtc *crtc, struct drm_atomic_state *state)
 {
+	msmfb_output(container_of(crtc, struct msmfb, crtc), true);
 	drm_crtc_vblank_on(crtc);
 }
 
@@ -1528,6 +1589,7 @@ static void
 msmfb_crtc_atomic_disable(struct drm_crtc *crtc, struct drm_atomic_state *state)
 {
 	struct msmfb *fb = container_of(crtc, struct msmfb, crtc);
+	struct drm_crtc_state *new = drm_atomic_get_new_crtc_state(state, crtc);
 
 	drm_crtc_vblank_off(crtc);
 	/* Complete a flip that vblank_off left without its vsync. */
@@ -1542,6 +1604,9 @@ msmfb_crtc_atomic_disable(struct drm_crtc *crtc, struct drm_atomic_state *state)
 		crtc->state->event = NULL;
 	}
 	spin_unlock_irq(&crtc->dev->event_lock);
+	/* Off, rather than on in another mode. */
+	if (!new->active)
+		msmfb_output(fb, false);
 }
 
 static const struct drm_crtc_helper_funcs msmfb_crtc_helper_funcs = {
@@ -1694,16 +1759,12 @@ static void
 msmfb_master_drop(struct drm_device *drm, struct drm_file *file)
 {
 	struct msmfb *fb = to_msmfb(drm);
-	unsigned long flags;
 
 	/*
-	 * Show the console again, in its mode: the client's buffers may go
-	 * away, and nothing else will point the pipe back.
+	 * Show the console again: the client's buffers may go away, and
+	 * nothing else will point the pipe back, or turn the output on.
 	 */
-	msmfb_set_mode(fb, &fb->fw_mode);
-	spin_lock_irqsave(&fb->lock, flags);
-	msmfb_scanout(fb, fb->console_addr, fb->console_stride);
-	spin_unlock_irqrestore(&fb->lock, flags);
+	msmfb_show_console(fb);
 	if (fb->vt_frozen) {
 		vt_unfreeze_main_vd();
 		fb->vt_frozen = false;
@@ -1856,9 +1917,8 @@ msmfb_remove(struct platform_device *pdev)
 	msmfb_dp_write(fb, DP_HPD_INT_MASK, 0);
 	cancel_work_sync(&fb->hotplug_work);
 	drm_dev_unplug(&fb->drm);
-	/* Disables the plane, which shows the console again. */
 	drm_atomic_helper_shutdown(&fb->drm);
-	msmfb_set_mode(fb, &fb->fw_mode);
+	msmfb_show_console(fb);
 	msmfb_vsync_intr(fb, false);
 	drm_edid_free(fb->edid);
 	fb->edid = NULL;
