@@ -28,12 +28,21 @@
 /*
  * msmfb: a KMS driver for the display pipeline the boot firmware left
  * running.  The firmware scans its framebuffer out through one DPU source
- * pipe, layer mixer, control path and interface to a DisplayPort output; the
- * link, the PHY and the clocks stay as it set them, so the mode cannot
- * change.  A flip points the source pipe at the client's buffer and flushes
- * it, which takes effect at the next vsync; the interface's vsync interrupt
- * drives vblank.  With no client, the pipe shows the firmware framebuffer and
- * the console.
+ * pipe, layer mixer, control path and interface to a DisplayPort output.  A
+ * flip points the source pipe at the client's buffer and flushes it, which
+ * takes effect at the next vsync; the interface's vsync interrupt drives
+ * vblank.  With no client, the pipe shows the firmware framebuffer and the
+ * console.
+ *
+ * The PHY and the link's rate and lanes stay as the firmware set them up; a
+ * mode is the stream on that link.  Setting one goes as msm disables and
+ * enables its output: the link idles at the end of a frame, the interface
+ * stops and the link goes off; the pixel clock, the controller's stream
+ * timing, MSA and transfer unit, the pipe and mixer sizes and the interface's
+ * timing are set, all as msm works them out; and the link comes back on, is
+ * trained, and carries the stream the interface starts again.  The firmware's
+ * registers are kept, to put its mode back for the console when the client
+ * goes.
  *
  * The DisplayPort controller's AUX channel reads the sink's capabilities and
  * the monitor's EDID, which the connector reports.  Its transfers are polled,
@@ -100,8 +109,11 @@
 #include <drm/drm_vblank.h>
 
 #include "msm_freebsd.h"
+#include "msm_freebsd_dp_calc.h"
 
 #define	MSMFB_CPP		4
+#define	MSMFB_MAX_WIDTH		2560		/* of a layer mixer */
+#define	MSMFB_MAX_PIXEL_KHZ	675000		/* msm's DP_MAX_PIXEL_CLK_KHZ */
 
 /* DPU registers, relative to the MDP block. */
 /* MDSS registers, relative to the display window. */
@@ -112,13 +124,51 @@
 #define	MDP_INTR_STATUS		0x014
 #define	MDP_INTR_CLEAR		0x018
 #define	SSPP_SRC_SIZE		0x000
+#define	SSPP_OUT_SIZE		0x00c
 #define	SSPP_SRC0_ADDR		0x014
 #define	SSPP_SRC_YSTRIDE0	0x024
+#define	LM_OUT_SIZE		0x004
 #define	CTL_FLUSH		0x018
+#define	 CTL_FLUSH_CTL		(1u << 17)
+#define	 CTL_FLUSH_INTF		(1u << 31)
+#define	CTL_INTF_FLUSH		0x110
+#define	INTF_TIMING_ENGINE_EN	0x000
+#define	INTF_CONFIG		0x004
+#define	 INTF_CFG_ACTIVE_H_EN	(1u << 29)
+#define	 INTF_CFG_ACTIVE_V_EN	(1u << 30)
+#define	 INTF_CFG_PROG_FETCH	(1u << 31)
+#define	INTF_HSYNC_CTL		0x008
+#define	INTF_VSYNC_PERIOD_F0	0x00c
+#define	INTF_VSYNC_PULSE_WIDTH_F0 0x014
+#define	INTF_DISPLAY_V_START_F0	0x01c
+#define	INTF_DISPLAY_V_END_F0	0x024
+#define	INTF_ACTIVE_V_START_F0	0x02c
+#define	INTF_ACTIVE_V_END_F0	0x034
+#define	INTF_DISPLAY_HCTL	0x03c
+#define	INTF_ACTIVE_HCTL	0x040
+#define	INTF_POLARITY_CTL	0x050
+#define	INTF_CONFIG2		0x060
+#define	 INTF_CFG2_DATABUS_WIDEN (1u << 0)
+#define	INTF_DISPLAY_DATA_HCTL	0x064
+#define	INTF_ACTIVE_DATA_HCTL	0x068
+
+/* A clock root's registers. */
+#define	RCG_CMD			0x000
+#define	 RCG_CMD_UPDATE		(1u << 0)
+#define	RCG_CFG			0x004
+#define	 RCG_CFG_MODE_MASK	(3u << 12)
+#define	 RCG_CFG_MODE_DUAL_EDGE	(2u << 12)
+#define	RCG_M			0x008
+#define	RCG_N			0x00c
+#define	RCG_D			0x010
 
 /* DisplayPort controller registers, relative to the controller. */
 #define	DP_INTR_STATUS		0x020		/* AHB block */
-#define	DP_AUX_DATA		0x234		/* AUX block from here */
+#define	DP_INTR_STATUS2		0x024
+#define	 DP_INTR_IDLE_PATTERN_SENT (1u << 3)
+#define	DP_AUX_CTRL		0x230		/* AUX block */
+#define	 DP_AUX_CTRL_RESET	(1u << 1)
+#define	DP_AUX_DATA		0x234
 #define	 DP_AUX_DATA_READ	(1u << 0)
 #define	 DP_AUX_DATA_INDEX_WRITE (1u << 31)
 #define	DP_AUX_TRANS_CTRL	0x238
@@ -133,10 +183,26 @@
 #define	DP_HPD_INT_ACK		0x208
 #define	DP_HPD_INT_MASK		0x20c
 #define	DP_PHY_AUX_INTR_CLEAR	0x24c
-#define	DP_STATE_CTRL		0x404		/* link block */
+#define	DP_MAINLINK_CTRL	0x400		/* link block */
+#define	 DP_MAINLINK_ENABLE	(1u << 0)
+#define	 DP_MAINLINK_RESET	(1u << 1)
+#define	 DP_MAINLINK_FB_BOUNDARY_SEL (1u << 25)
+#define	DP_STATE_CTRL		0x404
 #define	 DP_STATE_SEND_VIDEO	(1u << 7)
+#define	 DP_STATE_PUSH_IDLE	(1u << 8)
+#define	DP_SOFTWARE_MVID	0x410
+#define	DP_SOFTWARE_NVID	0x418
+#define	DP_TOTAL_HOR_VER	0x41c
+#define	DP_START_HOR_VER_FROM_SYNC 0x420
+#define	DP_HSYNC_VSYNC_WIDTH_POLARITY 0x424
+#define	 DP_HSYNC_ACTIVE_LOW	(1u << 15)
+#define	 DP_VSYNC_ACTIVE_LOW	(1u << 31)
+#define	DP_ACTIVE_HOR_VER	0x428
+#define	DP_VALID_BOUNDARY	0x430
+#define	DP_VALID_BOUNDARY_2	0x434
 #define	DP_MAINLINK_READY	0x440
 #define	 DP_READY_TRAINING_SHIFT 3
+#define	DP_TU			0x44c
 
 /* The PHY's transmit blocks, each two lanes. */
 #define	PHY_TX_EMP_POST1_LVL	0x004
@@ -155,6 +221,22 @@
 
 extern struct vt_device *main_vd;
 
+/*
+ * What holds a mode: the DisplayPort pixel clock's M/N/D counter, the
+ * controller's stream timing, MSA and transfer unit, the sizes of the pipe
+ * and the mixer, and the interface's timing.
+ */
+struct msmfb_timing {
+	u32	rcg_m, rcg_n, rcg_d, rcg_cfg;
+	u32	dp_total, dp_start, dp_sync, dp_active;
+	u32	dp_mvid, dp_nvid, dp_vb, dp_vb2, dp_tu;
+	u32	size;
+	u32	intf_hsync, intf_vperiod, intf_vpulse;
+	u32	intf_disp_vstart, intf_disp_vend, intf_act_vstart, intf_act_vend;
+	u32	intf_disp_hctl, intf_act_hctl, intf_polarity;
+	u32	intf_config, intf_config2, intf_data_hctl, intf_act_data_hctl;
+};
+
 struct msmfb {
 	struct drm_device		drm;
 	const struct msm_fbsd_disp	*disp;
@@ -165,10 +247,14 @@ struct msmfb {
 	const struct drm_edid		*edid;		/* or NULL */
 	bool				connected;
 	struct work_struct		hotplug_work;
+	u_int				link_rate;	/* kHz, or 0 */
+	u_int				lanes;
 	u32				console_addr;	/* the firmware's scanout */
 	u32				console_stride;
-	u_int				width, height;
-	struct drm_display_mode		mode;
+	struct mutex			mode_lock;	/* the timing, below */
+	struct msmfb_timing		fw_timing;
+	struct drm_display_mode		fw_mode;
+	struct drm_display_mode		hw_mode;	/* what the timing is */
 	struct drm_plane		plane;
 	struct drm_crtc			crtc;
 	struct drm_encoder		encoder;
@@ -251,7 +337,7 @@ msmfb_dp_write(struct msmfb *fb, u_int off, u32 val)
  * the read that follows it.
  */
 static int
-msmfb_aux(struct msmfb *fb, bool i2c, bool read, u32 addr, u8 *buf,
+msmfb_aux_once(struct msmfb *fb, bool i2c, bool read, u32 addr, u8 *buf,
     size_t len)
 {
 	u32 hdr[4], st, trans;
@@ -312,6 +398,29 @@ msmfb_aux(struct msmfb *fb, bool i2c, bool read, u32 addr, u8 *buf,
 	for (i = 0; i < len; i++)
 		buf[i] = (msmfb_dp_read(fb, DP_AUX_DATA) >> 8) & 0xff;
 	return (0);
+}
+
+/*
+ * A transfer, retried as the DRM helpers do, after resetting the AUX block
+ * as msm does when one fails: a sink losing its link may miss one.
+ */
+static int
+msmfb_aux(struct msmfb *fb, bool i2c, bool read, u32 addr, u8 *buf,
+    size_t len)
+{
+	u32 ctrl;
+	int error, tries;
+
+	for (tries = 0; tries < (i2c ? 3 : 32); tries++) {
+		error = msmfb_aux_once(fb, i2c, read, addr, buf, len);
+		if (error == 0 || error == -EINVAL)
+			break;
+		ctrl = msmfb_dp_read(fb, DP_AUX_CTRL);
+		msmfb_dp_write(fb, DP_AUX_CTRL, ctrl | DP_AUX_CTRL_RESET);
+		usleep_range(1000, 1100);
+		msmfb_dp_write(fb, DP_AUX_CTRL, ctrl & ~DP_AUX_CTRL_RESET);
+	}
+	return (error);
 }
 
 /* A native AUX write of one byte, for the DPCD. */
@@ -464,6 +573,8 @@ msmfb_link_train(struct msmfb *fb)
 	int error, tries, old_v, n;
 
 	memset(&t, 0, sizeof(t));
+	memset(status, 0, sizeof(status));
+	tries = -1;
 	error = msmfb_aux(fb, false, true, DP_DPCD_REV, t.dpcd, 15);
 	if (error != 0)
 		return (error);
@@ -472,7 +583,7 @@ msmfb_link_train(struct msmfb *fb)
 	if (error != 0)
 		return (error);
 	t.bw = cfg[0];
-	t.lanes = cfg[1] & DP_LANE_COUNT_MASK;
+	t.lanes = fb->lanes != 0 ? fb->lanes : cfg[1] & DP_LANE_COUNT_MASK;
 	if (t.lanes == 0 || t.lanes > 4 || t.bw == 0)
 		return (-EINVAL);
 
@@ -489,6 +600,9 @@ msmfb_link_train(struct msmfb *fb)
 
 	/* Clock recovery. */
 	error = msmfb_train_pattern(fb, 1);
+	if (error != 0)
+		dev_warn(fb->drm.dev, "link training: no pattern 1, ready "
+		    "%#x\n", msmfb_dp_read(fb, DP_MAINLINK_READY));
 	if (error == 0)
 		error = msmfb_dpcd_writeb(fb, DP_TRAINING_PATTERN_SET,
 		    DP_TRAINING_PATTERN_1 | DP_LINK_SCRAMBLING_DISABLE);
@@ -513,7 +627,9 @@ msmfb_link_train(struct msmfb *fb)
 	}
 	if (error != 0) {
 		dev_warn(fb->drm.dev, "link training: clock recovery failed: "
-		    "%d\n", error);
+		    "%d after %d tries, swing %d pre-emphasis %d, lanes %#04x "
+		    "%#04x, ready %#x\n", error, tries, t.v, t.p, status[0],
+		    status[1], msmfb_dp_read(fb, DP_MAINLINK_READY));
 		goto out;
 	}
 
@@ -620,6 +736,20 @@ msmfb_probe_sink(struct msmfb *fb)
 	    dpcd[DP_MAX_LANE_COUNT] & DP_MAX_LANE_COUNT_MASK,
 	    dpcd[DP_MAX_LINK_RATE] * 27 / 100,
 	    dpcd[DP_MAX_LINK_RATE] * 27 % 100);
+
+	/* The link the firmware trained, which modes are set on. */
+	if (msmfb_aux(fb, false, true, DP_LINK_BW_SET, dpcd, 2) != 0)
+		return;
+	fb->link_rate = drm_dp_bw_code_to_link_rate(dpcd[0]);
+	fb->lanes = dpcd[1] & DP_LANE_COUNT_MASK;
+	if ((fb->link_rate != 162000 && fb->link_rate != 270000 &&
+	    fb->link_rate != 540000 && fb->link_rate != 810000) ||
+	    (fb->lanes != 1 && fb->lanes != 2 && fb->lanes != 4))
+		fb->link_rate = 0;
+	else
+		dev_info(fb->drm.dev, "link: %u lanes at %u.%02u Gb/s\n",
+		    fb->lanes, fb->link_rate / 100000,
+		    fb->link_rate / 1000 % 100);
 }
 
 /*
@@ -699,6 +829,329 @@ msmfb_hotplug_work(struct work_struct *work)
 	    fb->connected ? "connected" : "disconnected");
 	if (changed)
 		drm_kms_helper_hotplug_event(&fb->drm);
+}
+
+/* Mode setting */
+
+enum msmfb_block { MSMFB_RCG, MSMFB_DP, MSMFB_SSPP, MSMFB_LM, MSMFB_INTF };
+
+#define	MSMFB_TREG(b, r, f)	{ b, r, offsetof(struct msmfb_timing, f) }
+
+/* Where the timing goes, in the order it is written. */
+static const struct {
+	enum msmfb_block	block;
+	u_int			reg;
+	size_t			field;
+} msmfb_timing_regs[] = {
+	MSMFB_TREG(MSMFB_RCG, RCG_M, rcg_m),
+	MSMFB_TREG(MSMFB_RCG, RCG_N, rcg_n),
+	MSMFB_TREG(MSMFB_RCG, RCG_D, rcg_d),
+	MSMFB_TREG(MSMFB_RCG, RCG_CFG, rcg_cfg),
+	MSMFB_TREG(MSMFB_DP, DP_TOTAL_HOR_VER, dp_total),
+	MSMFB_TREG(MSMFB_DP, DP_START_HOR_VER_FROM_SYNC, dp_start),
+	MSMFB_TREG(MSMFB_DP, DP_HSYNC_VSYNC_WIDTH_POLARITY, dp_sync),
+	MSMFB_TREG(MSMFB_DP, DP_ACTIVE_HOR_VER, dp_active),
+	MSMFB_TREG(MSMFB_DP, DP_SOFTWARE_MVID, dp_mvid),
+	MSMFB_TREG(MSMFB_DP, DP_SOFTWARE_NVID, dp_nvid),
+	MSMFB_TREG(MSMFB_DP, DP_VALID_BOUNDARY, dp_vb),
+	MSMFB_TREG(MSMFB_DP, DP_TU, dp_tu),
+	MSMFB_TREG(MSMFB_DP, DP_VALID_BOUNDARY_2, dp_vb2),
+	MSMFB_TREG(MSMFB_SSPP, SSPP_SRC_SIZE, size),
+	MSMFB_TREG(MSMFB_SSPP, SSPP_OUT_SIZE, size),
+	MSMFB_TREG(MSMFB_LM, LM_OUT_SIZE, size),
+	MSMFB_TREG(MSMFB_INTF, INTF_HSYNC_CTL, intf_hsync),
+	MSMFB_TREG(MSMFB_INTF, INTF_VSYNC_PERIOD_F0, intf_vperiod),
+	MSMFB_TREG(MSMFB_INTF, INTF_VSYNC_PULSE_WIDTH_F0, intf_vpulse),
+	MSMFB_TREG(MSMFB_INTF, INTF_DISPLAY_HCTL, intf_disp_hctl),
+	MSMFB_TREG(MSMFB_INTF, INTF_DISPLAY_V_START_F0, intf_disp_vstart),
+	MSMFB_TREG(MSMFB_INTF, INTF_DISPLAY_V_END_F0, intf_disp_vend),
+	MSMFB_TREG(MSMFB_INTF, INTF_ACTIVE_HCTL, intf_act_hctl),
+	MSMFB_TREG(MSMFB_INTF, INTF_ACTIVE_V_START_F0, intf_act_vstart),
+	MSMFB_TREG(MSMFB_INTF, INTF_ACTIVE_V_END_F0, intf_act_vend),
+	MSMFB_TREG(MSMFB_INTF, INTF_POLARITY_CTL, intf_polarity),
+	MSMFB_TREG(MSMFB_INTF, INTF_CONFIG, intf_config),
+	MSMFB_TREG(MSMFB_INTF, INTF_CONFIG2, intf_config2),
+	MSMFB_TREG(MSMFB_INTF, INTF_DISPLAY_DATA_HCTL, intf_data_hctl),
+	MSMFB_TREG(MSMFB_INTF, INTF_ACTIVE_DATA_HCTL, intf_act_data_hctl),
+};
+
+static void __iomem *
+msmfb_block(struct msmfb *fb, enum msmfb_block block)
+{
+	const struct msm_fbsd_disp *d = fb->disp;
+
+	switch (block) {
+	case MSMFB_RCG:
+		return (fb->mdss + d->dp_pixel_rcg);
+	case MSMFB_DP:
+		return (fb->dp);
+	case MSMFB_SSPP:
+		return (fb->mdp + d->sspp);
+	case MSMFB_LM:
+		return (fb->mdp + d->lm);
+	case MSMFB_INTF:
+	default:
+		return (fb->mdp + d->intf);
+	}
+}
+
+static inline u32 *
+msmfb_treg_field(struct msmfb_timing *t, u_int i)
+{
+	return ((u32 *)((char *)t + msmfb_timing_regs[i].field));
+}
+
+static void
+msmfb_read_timing(struct msmfb *fb, struct msmfb_timing *t)
+{
+	u_int i;
+
+	for (i = 0; i < nitems(msmfb_timing_regs); i++)
+		*msmfb_treg_field(t, i) = readl(msmfb_block(fb,
+		    msmfb_timing_regs[i].block) + msmfb_timing_regs[i].reg);
+}
+
+/* How many pixels the interface's bus carries at once. */
+static u_int
+msmfb_bus_pixels(struct msmfb *fb)
+{
+	return ((fb->fw_timing.intf_config2 & INTF_CFG2_DATABUS_WIDEN) != 0 ?
+	    2 : 1);
+}
+
+/* The pixel clock's parent, in kHz: the PHY's link clock, divided. */
+static u_long
+msmfb_pixel_parent(struct msmfb *fb)
+{
+	switch (fb->link_rate) {
+	case 810000:
+		return (fb->link_rate * 10 / 6);
+	case 540000:
+		return (fb->link_rate * 10 / 4);
+	default:
+		return (fb->link_rate * 10 / 2);
+	}
+}
+
+static bool
+msmfb_mode_same(const struct drm_display_mode *a,
+    const struct drm_display_mode *b)
+{
+	return (drm_mode_match(a, b, DRM_MODE_MATCH_TIMINGS |
+	    DRM_MODE_MATCH_CLOCK | DRM_MODE_MATCH_FLAGS));
+}
+
+/* The mode a timing is, for the firmware's. */
+static void
+msmfb_timing_mode(struct msmfb *fb, const struct msmfb_timing *t,
+    struct drm_display_mode *m)
+{
+	u32 n;
+
+	memset(m, 0, sizeof(*m));
+	m->hdisplay = t->dp_active & 0xffff;
+	m->vdisplay = t->dp_active >> 16;
+	m->htotal = t->dp_total & 0xffff;
+	m->vtotal = t->dp_total >> 16;
+	m->hsync_start = m->htotal - (t->dp_start & 0xffff);
+	m->vsync_start = m->vtotal - (t->dp_start >> 16);
+	m->hsync_end = m->hsync_start + (t->dp_sync & 0x7fff);
+	m->vsync_end = m->vsync_start + ((t->dp_sync >> 16) & 0x7fff);
+	m->flags = ((t->dp_sync & DP_HSYNC_ACTIVE_LOW) != 0 ?
+	    DRM_MODE_FLAG_NHSYNC : DRM_MODE_FLAG_PHSYNC) |
+	    ((t->dp_sync & DP_VSYNC_ACTIVE_LOW) != 0 ?
+	    DRM_MODE_FLAG_NVSYNC : DRM_MODE_FLAG_PVSYNC);
+	if (fb->link_rate != 0 && t->rcg_m != 0 &&
+	    (t->rcg_cfg & RCG_CFG_MODE_MASK) != 0) {
+		n = (~t->rcg_n & 0xffff) + t->rcg_m;
+		m->clock = msmfb_pixel_parent(fb) * t->rcg_m / n *
+		    msmfb_bus_pixels(fb);
+	} else		/* assume 60 Hz */
+		m->clock = m->htotal * m->vtotal * 60 / 1000;
+	m->width_mm = DRM_MODE_RES_MM(m->hdisplay, 96ul);
+	m->height_mm = DRM_MODE_RES_MM(m->vdisplay, 96ul);
+	m->type = DRM_MODE_TYPE_DRIVER;
+	drm_mode_set_name(m);
+}
+
+/* The timing of a mode, as Linux's msm sets it. */
+static void
+msmfb_compute_timing(struct msmfb *fb, const struct drm_display_mode *m,
+    struct msmfb_timing *t)
+{
+	struct msm_dp_tu_calc_input in;
+	struct msm_dp_vc_tu_mapping_table tu;
+	u_int bus, hsw, hbp, width, vsw, vbp, hperiod, vperiod, hstart;
+	bool nh, nv;
+
+	nh = (m->flags & DRM_MODE_FLAG_NHSYNC) != 0;
+	nv = (m->flags & DRM_MODE_FLAG_NVSYNC) != 0;
+	*t = fb->fw_timing;
+
+	/* The pixel clock is the interface's, for as many as its bus. */
+	bus = msmfb_bus_pixels(fb);
+	msm_fbsd_dp_calc_pixel_mnd(msmfb_pixel_parent(fb), m->clock / bus,
+	    &t->rcg_m, &t->rcg_n, &t->rcg_d);
+	t->rcg_cfg &= ~RCG_CFG_MODE_MASK;
+	if (t->rcg_m != 0)
+		t->rcg_cfg |= RCG_CFG_MODE_DUAL_EDGE;
+
+	/* The stream, as msm_dp_ctrl_on_stream() sets it up. */
+	t->dp_total = m->vtotal << 16 | m->htotal;
+	t->dp_start = (m->vtotal - m->vsync_start) << 16 |
+	    (m->htotal - m->hsync_start);
+	t->dp_sync = (m->vsync_end - m->vsync_start) << 16 |
+	    (m->hsync_end - m->hsync_start) |
+	    (nh ? DP_HSYNC_ACTIVE_LOW : 0) | (nv ? DP_VSYNC_ACTIVE_LOW : 0);
+	t->dp_active = m->vdisplay << 16 | m->hdisplay;
+	msm_fbsd_dp_calc_msa(fb->link_rate, m->clock, &t->dp_mvid,
+	    &t->dp_nvid);
+	memset(&in, 0, sizeof(in));
+	in.lclk = fb->link_rate / 1000;
+	in.pclk_khz = m->clock;
+	in.hactive = m->hdisplay;
+	in.hporch = m->htotal - m->hdisplay;
+	in.nlanes = fb->lanes;
+	in.bpp = 24;
+	in.pixel_enc = 444;
+	in.compress_ratio = 100;
+	msm_fbsd_dp_calc_tu(&in, &tu);
+	t->dp_tu = tu.tu_size_minus1;
+	t->dp_vb = tu.valid_boundary_link | tu.delay_start_link << 16;
+	t->dp_vb2 = (tu.boundary_moderation_en ? 1 : 0) |
+	    tu.valid_lower_boundary_link << 1 | tu.upper_boundary_count << 16 |
+	    tu.lower_boundary_count << 20;
+
+	t->size = m->vdisplay << 16 | m->hdisplay;
+
+	/*
+	 * The interface, as dpu_hw_intf_setup_timing_engine() sets it up for
+	 * DP: with the front porches moved to the back porches, and across in
+	 * units of what its bus carries.
+	 */
+	hsw = (m->hsync_end - m->hsync_start) / bus;
+	hbp = (m->htotal - m->hsync_end + m->hsync_start - m->hdisplay) / bus;
+	width = m->hdisplay / bus;
+	vsw = m->vsync_end - m->vsync_start;
+	vbp = m->vtotal - m->vsync_end + m->vsync_start - m->vdisplay;
+	hperiod = hsw + hbp + width;
+	vperiod = vsw + vbp + m->vdisplay;
+	hstart = hsw + hbp;
+	t->intf_hsync = hperiod << 16 | hsw;
+	t->intf_vperiod = vperiod * hperiod;
+	t->intf_vpulse = vsw * hperiod;
+	t->intf_disp_hctl = (hstart + width - 1) << 16 | hstart;
+	t->intf_disp_vstart = (vsw + vbp) * hperiod + hstart;
+	t->intf_disp_vend = vperiod * hperiod - 1;
+	t->intf_act_hctl = t->intf_disp_hctl;
+	t->intf_act_vstart = t->intf_disp_vstart;
+	t->intf_act_vend = t->intf_act_vstart + m->vdisplay * hperiod - 1;
+	t->intf_polarity = (nv ? 2 : 0) | (nh ? 1 : 0);
+	t->intf_config = (t->intf_config & ~INTF_CFG_PROG_FETCH) |
+	    INTF_CFG_ACTIVE_H_EN | INTF_CFG_ACTIVE_V_EN;
+	t->intf_data_hctl = t->intf_disp_hctl;
+	t->intf_act_data_hctl = 0;
+}
+
+/*
+ * Change the stream over, as msm's DPU encoder and DP bridge do when they
+ * are disabled and enabled again, less the PHY and the link clocks, which
+ * stay up; with sink_lock held.
+ */
+static void
+msmfb_write_timing(struct msmfb *fb, const struct msmfb_timing *t)
+{
+	const struct msm_fbsd_disp *d = fb->disp;
+	void __iomem *rcg = fb->mdss + d->dp_pixel_rcg;
+	unsigned long flags;
+	u_int i, frame_ms;
+	u32 ml;
+
+	/*
+	 * As msm disables the output: the link idles, at the end of a frame
+	 * of the stream; the interface stops, at its next vsync; the link
+	 * goes off.
+	 */
+	frame_ms = 1000 / max(drm_mode_vrefresh(&fb->hw_mode), 10) + 1;
+	msmfb_dp_write(fb, DP_INTR_STATUS2, msmfb_dp_read(fb, DP_INTR_STATUS2) |
+	    DP_INTR_IDLE_PATTERN_SENT << 1);
+	msmfb_dp_write(fb, DP_STATE_CTRL, DP_STATE_PUSH_IDLE);
+	for (i = 0; i < 3 * frame_ms && (msmfb_dp_read(fb, DP_INTR_STATUS2) &
+	    DP_INTR_IDLE_PATTERN_SENT) == 0; i++)
+		usleep_range(1000, 1100);
+	if (i == 3 * frame_ms)
+		dev_warn(fb->drm.dev, "the link didn't idle\n");
+	msmfb_dp_write(fb, DP_INTR_STATUS2, msmfb_dp_read(fb, DP_INTR_STATUS2) |
+	    DP_INTR_IDLE_PATTERN_SENT << 1);
+	msmfb_write(fb, d->intf + INTF_TIMING_ENGINE_EN, 0);
+	msleep(2 * frame_ms);
+	ml = msmfb_dp_read(fb, DP_MAINLINK_CTRL);
+	msmfb_dp_write(fb, DP_MAINLINK_CTRL, ml & ~DP_MAINLINK_ENABLE);
+
+	for (i = 0; i < nitems(msmfb_timing_regs); i++)
+		writel(*msmfb_treg_field(__DECONST(struct msmfb_timing *, t),
+		    i), msmfb_block(fb, msmfb_timing_regs[i].block) +
+		    msmfb_timing_regs[i].reg);
+	writel(readl(rcg + RCG_CMD) | RCG_CMD_UPDATE, rcg + RCG_CMD);
+	for (i = 0; i < 500 && (readl(rcg + RCG_CMD) & RCG_CMD_UPDATE) != 0;
+	    i++)
+		udelay(1);
+	if (i == 500)
+		dev_warn(fb->drm.dev, "the pixel clock didn't change\n");
+
+	/*
+	 * The link on again, reset, as msm_dp_catalog_ctrl_mainlink_ctrl()
+	 * has it, and trained, which leaves it sending the stream; then the
+	 * interface with its settings flushed in.
+	 */
+	ml &= ~(DP_MAINLINK_ENABLE | DP_MAINLINK_RESET);
+	msmfb_dp_write(fb, DP_MAINLINK_CTRL, ml);
+	msmfb_dp_write(fb, DP_MAINLINK_CTRL, ml | DP_MAINLINK_RESET);
+	msmfb_dp_write(fb, DP_MAINLINK_CTRL, ml);
+	msmfb_dp_write(fb, DP_MAINLINK_CTRL, ml | DP_MAINLINK_ENABLE |
+	    DP_MAINLINK_FB_BOUNDARY_SEL);
+	if (!fb->connected || msmfb_link_train(fb) != 0)
+		msmfb_dp_write(fb, DP_STATE_CTRL, DP_STATE_SEND_VIDEO);
+	spin_lock_irqsave(&fb->lock, flags);
+	msmfb_write(fb, d->ctl + CTL_INTF_FLUSH, d->ctl_flush_intf);
+	msmfb_write(fb, d->ctl + CTL_FLUSH, d->ctl_flush_sspp |
+	    d->ctl_flush_lm | CTL_FLUSH_CTL | CTL_FLUSH_INTF);
+	spin_unlock_irqrestore(&fb->lock, flags);
+	msmfb_write(fb, d->intf + INTF_TIMING_ENGINE_EN, 1);
+}
+
+/* Whether the sink holds the link: its lanes locked and aligned. */
+static bool
+msmfb_link_ok(struct msmfb *fb)
+{
+	u8 st[DP_LINK_STATUS_SIZE];
+
+	return (msmfb_aux(fb, false, true, DP_LANE0_1_STATUS, st,
+	    sizeof(st)) == 0 && drm_dp_channel_eq_ok(st, fb->lanes));
+}
+
+static void
+msmfb_set_mode(struct msmfb *fb, const struct drm_display_mode *mode)
+{
+	struct msmfb_timing t;
+
+	mutex_lock(&fb->mode_lock);
+	if (msmfb_mode_same(&fb->hw_mode, mode)) {
+		mutex_unlock(&fb->mode_lock);
+		return;
+	}
+	if (msmfb_mode_same(&fb->fw_mode, mode))
+		t = fb->fw_timing;
+	else
+		msmfb_compute_timing(fb, mode, &t);
+	mutex_lock(&fb->sink_lock);
+	msmfb_write_timing(fb, &t);
+	if (fb->connected && !msmfb_link_ok(fb))
+		dev_info(fb->drm.dev, "link not locked after mode change\n");
+	mutex_unlock(&fb->sink_lock);
+	drm_mode_copy(&fb->hw_mode, mode);
+	mutex_unlock(&fb->mode_lock);
+	dev_info(fb->drm.dev, "mode " DRM_MODE_FMT "\n", DRM_MODE_ARG(mode));
 }
 
 /* GEM objects */
@@ -999,9 +1452,23 @@ msmfb_crtc_mode_valid(struct drm_crtc *crtc, const struct drm_display_mode *mode
 {
 	struct msmfb *fb = container_of(crtc, struct msmfb, crtc);
 
-	if (mode->hdisplay != fb->mode.hdisplay ||
-	    mode->vdisplay != fb->mode.vdisplay)
-		return (MODE_ONE_SIZE);
+	if (msmfb_mode_same(mode, &fb->fw_mode))
+		return (MODE_OK);
+	/* Others need the link's rate, for the pixel clock. */
+	if (fb->link_rate == 0)
+		return (MODE_BAD);
+	if ((mode->flags & DRM_MODE_FLAG_INTERLACE) != 0)
+		return (MODE_NO_INTERLACE);
+	if ((mode->flags & DRM_MODE_FLAG_DBLSCAN) != 0)
+		return (MODE_NO_DBLESCAN);
+	if (mode->hdisplay > MSMFB_MAX_WIDTH)
+		return (MODE_BAD_HVALUE);
+	if (msmfb_bus_pixels(fb) == 2 && ((mode->hdisplay | mode->hsync_start |
+	    mode->hsync_end | mode->htotal) & 1) != 0)
+		return (MODE_H_ILLEGAL);
+	if (mode->clock > MSMFB_MAX_PIXEL_KHZ ||
+	    (uint64_t)mode->clock * 24 > (uint64_t)fb->link_rate * 8 * fb->lanes)
+		return (MODE_CLOCK_HIGH);
 	return (MODE_OK);
 }
 
@@ -1013,6 +1480,21 @@ msmfb_crtc_atomic_check(struct drm_crtc *crtc, struct drm_atomic_state *state)
 	if (!new->enable)
 		return (0);
 	return (drm_atomic_helper_check_crtc_primary_plane(new));
+}
+
+/*
+ * A new mode goes on before the plane shows a buffer of its size.  It goes
+ * on here, not in atomic_enable, for the firmware's mode that the console
+ * gets back behind the atomic state's back.
+ */
+static void
+msmfb_crtc_atomic_begin(struct drm_crtc *crtc, struct drm_atomic_state *state)
+{
+	struct msmfb *fb = container_of(crtc, struct msmfb, crtc);
+	struct drm_crtc_state *new = drm_atomic_get_new_crtc_state(state, crtc);
+
+	if (new->active)
+		msmfb_set_mode(fb, &new->adjusted_mode);
 }
 
 /* The flip's event goes out at the vsync where the pipe latches it. */
@@ -1065,6 +1547,7 @@ msmfb_crtc_atomic_disable(struct drm_crtc *crtc, struct drm_atomic_state *state)
 static const struct drm_crtc_helper_funcs msmfb_crtc_helper_funcs = {
 	.mode_valid = msmfb_crtc_mode_valid,
 	.atomic_check = msmfb_crtc_atomic_check,
+	.atomic_begin = msmfb_crtc_atomic_begin,
 	.atomic_flush = msmfb_crtc_atomic_flush,
 	.atomic_enable = msmfb_crtc_atomic_enable,
 	.atomic_disable = msmfb_crtc_atomic_disable,
@@ -1093,11 +1576,16 @@ msmfb_connector_get_modes(struct drm_connector *connector)
 	struct msmfb *fb = container_of(connector, struct msmfb, connector);
 	int n;
 
-	/* The monitor's identity; the mode stays the firmware's for now. */
+	/* The monitor's modes, or without its EDID the firmware's. */
 	mutex_lock(&fb->sink_lock);
 	drm_edid_connector_update(connector, fb->edid);
-	n = fb->connected ?
-	    drm_connector_helper_get_modes_fixed(connector, &fb->mode) : 0;
+	n = 0;
+	if (fb->connected) {
+		n = drm_edid_connector_add_modes(connector);
+		if (n == 0)
+			n = drm_connector_helper_get_modes_fixed(connector,
+			    &fb->fw_mode);
+	}
 	mutex_unlock(&fb->sink_lock);
 	return (n);
 }
@@ -1209,9 +1697,10 @@ msmfb_master_drop(struct drm_device *drm, struct drm_file *file)
 	unsigned long flags;
 
 	/*
-	 * Show the console again: the client's buffers may go away, and
-	 * nothing else will point the pipe back.
+	 * Show the console again, in its mode: the client's buffers may go
+	 * away, and nothing else will point the pipe back.
 	 */
+	msmfb_set_mode(fb, &fb->fw_mode);
 	spin_lock_irqsave(&fb->lock, flags);
 	msmfb_scanout(fb, fb->console_addr, fb->console_stride);
 	spin_unlock_irqrestore(&fb->lock, flags);
@@ -1242,16 +1731,11 @@ msmfb_kms_init(struct msmfb *fb)
 	struct drm_device *drm = &fb->drm;
 	int error;
 
-	/* The firmware doesn't report timings; assume 60 Hz and 96 dpi. */
-	fb->mode = (struct drm_display_mode){ DRM_MODE_INIT(60, fb->width,
-	    fb->height, DRM_MODE_RES_MM(fb->width, 96ul),
-	    DRM_MODE_RES_MM(fb->height, 96ul)) };
-
 	error = drmm_mode_config_init(drm);
 	if (error != 0)
 		return (error);
-	drm->mode_config.min_width = drm->mode_config.max_width = fb->width;
-	drm->mode_config.min_height = drm->mode_config.max_height = fb->height;
+	drm->mode_config.max_width = MSMFB_MAX_WIDTH;
+	drm->mode_config.max_height = MSMFB_MAX_WIDTH;
 	drm->mode_config.preferred_depth = 24;
 	drm->mode_config.funcs = &msmfb_mode_config_funcs;
 
@@ -1314,6 +1798,7 @@ msmfb_probe(struct platform_device *pdev)
 	fb->dp = fb->mdss + d->dp;
 	fb->mdp = fb->mdss + d->mdp;
 	mutex_init(&fb->sink_lock);
+	mutex_init(&fb->mode_lock);
 	INIT_WORK(&fb->hotplug_work, msmfb_hotplug_work);
 
 	/*
@@ -1324,16 +1809,22 @@ msmfb_probe(struct platform_device *pdev)
 	fb->console_stride = msmfb_read(fb, d->sspp + SSPP_SRC_YSTRIDE0) &
 	    0xffff;
 	size = msmfb_read(fb, d->sspp + SSPP_SRC_SIZE);
-	fb->width = size & 0xffff;
-	fb->height = size >> 16;
-	if ((msmfb_read(fb, d->intf) & 1) == 0 || fb->console_addr == 0 ||
-	    fb->width == 0 || fb->height == 0) {
+	if ((msmfb_read(fb, d->intf + INTF_TIMING_ENGINE_EN) & 1) == 0 ||
+	    fb->console_addr == 0 || (size & 0xffff) == 0 || size >> 16 == 0) {
 		dev_info(&pdev->dev, "the firmware left no display running\n");
 		return (-ENODEV);
 	}
 
 	msmfb_probe_sink(fb);
 	(void)msmfb_update_sink(fb);
+	msmfb_read_timing(fb, &fb->fw_timing);
+	if (fb->fw_timing.dp_active != size) {
+		dev_warn(&pdev->dev, "the pipe and the stream differ in size; "
+		    "keeping the firmware's mode\n");
+		fb->link_rate = 0;
+	}
+	msmfb_timing_mode(fb, &fb->fw_timing, &fb->fw_mode);
+	drm_mode_copy(&fb->hw_mode, &fb->fw_mode);
 	error = msmfb_kms_init(fb);
 	if (error != 0) {
 		drm_edid_free(fb->edid);
@@ -1352,8 +1843,8 @@ msmfb_probe(struct platform_device *pdev)
 	/* Hotplug events, less the one the firmware's plug left pending. */
 	msmfb_dp_write(fb, DP_HPD_INT_ACK, DP_HPD_EVENTS);
 	msmfb_dp_write(fb, DP_HPD_INT_MASK, DP_HPD_EVENTS);
-	dev_info(&pdev->dev, "%ux%u display, scanning out %#x\n", fb->width,
-	    fb->height, fb->console_addr);
+	dev_info(&pdev->dev, "firmware mode " DRM_MODE_FMT ", scanning out "
+	    "%#x\n", DRM_MODE_ARG(&fb->fw_mode), fb->console_addr);
 	return (0);
 }
 
@@ -1367,6 +1858,7 @@ msmfb_remove(struct platform_device *pdev)
 	drm_dev_unplug(&fb->drm);
 	/* Disables the plane, which shows the console again. */
 	drm_atomic_helper_shutdown(&fb->drm);
+	msmfb_set_mode(fb, &fb->fw_mode);
 	msmfb_vsync_intr(fb, false);
 	drm_edid_free(fb->edid);
 	fb->edid = NULL;

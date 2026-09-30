@@ -34,6 +34,7 @@ SRCS+=	adreno_device.c \
 
 SRCS+=	msm_freebsd.c \
 	msm_freebsd_bus.c \
+	msm_freebsd_dp_calc.c \
 	msm_freebsd_fb.c \
 	msm_freebsd_iommu.c \
 	msm_freebsd_misc.c \

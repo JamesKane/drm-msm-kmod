@@ -126,10 +126,14 @@ static const struct msm_fbsd_disp sc8280xp_disp = {
 	.mdp = 0x1000,
 	.dp = 0x9a000,			/* mdss0_dp2 */
 	.dp_phy_tx = { 0xc2200, 0xc2600 }, /* mdss0_dp2_phy tx0, tx1 */
+	.dp_pixel_rcg = 0x102208,	/* disp0_cc_mdss_dptx2_pixel0_clk_src */
 	.sspp = 0x8000,			/* SSPP_VIG2 */
+	.lm = 0x46000,			/* LM_2 */
 	.ctl = 0x17000,			/* CTL_2 */
 	.intf = 0x3a000,		/* INTF_6 */
 	.ctl_flush_sspp = 1u << 2,	/* VIG2 */
+	.ctl_flush_lm = 1u << 8,	/* LM_2 */
+	.ctl_flush_intf = 1u << 6,	/* INTF_6 */
 	.intr_vsync = 1u << 17,		/* INTF_6 vsync, MDP_SSPP_TOP0_INTR */
 	.mdss_intr_dp = 1u << 14,	/* mdss0_dp2's interrupt */
 };

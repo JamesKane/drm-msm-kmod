@@ -70,10 +70,14 @@ struct msm_fbsd_disp {
 	u32		mdp;		/* the MDP block */
 	u32		dp;		/* the DisplayPort controller */
 	u32		dp_phy_tx[2];	/* its PHY's transmit blocks, 2 lanes each */
+	u32		dp_pixel_rcg;	/* the controller's pixel clock root */
 	u32		sspp;		/* the source pipe, from the MDP block */
-	u32		ctl;		/* its control path */
+	u32		lm;		/* its layer mixer */
+	u32		ctl;		/* their control path */
 	u32		intf;		/* the interface */
 	u32		ctl_flush_sspp;	/* the pipe's CTL_FLUSH bit */
+	u32		ctl_flush_lm;	/* the mixer's */
+	u32		ctl_flush_intf;	/* the interface's CTL_INTF_FLUSH bit */
 	u32		intr_vsync;	/* the interface's vsync, in MDP_INTR_* */
 	u32		mdss_intr_dp;	/* the DP controller, in MDSS_HW_INTR_* */
 };
