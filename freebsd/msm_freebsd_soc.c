@@ -125,6 +125,7 @@ static const struct msm_fbsd_res sc8280xp_disp_res[] = {
 static const struct msm_fbsd_disp sc8280xp_disp = {
 	.mdp = 0x1000,
 	.dp = 0x9a000,			/* mdss0_dp2 */
+	.dp_phy_tx = { 0xc2200, 0xc2600 }, /* mdss0_dp2_phy tx0, tx1 */
 	.sspp = 0x8000,			/* SSPP_VIG2 */
 	.ctl = 0x17000,			/* CTL_2 */
 	.intf = 0x3a000,		/* INTF_6 */

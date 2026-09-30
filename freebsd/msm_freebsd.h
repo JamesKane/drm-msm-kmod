@@ -69,6 +69,7 @@ struct msm_fbsd_pdev_desc {
 struct msm_fbsd_disp {
 	u32		mdp;		/* the MDP block */
 	u32		dp;		/* the DisplayPort controller */
+	u32		dp_phy_tx[2];	/* its PHY's transmit blocks, 2 lanes each */
 	u32		sspp;		/* the source pipe, from the MDP block */
 	u32		ctl;		/* its control path */
 	u32		intf;		/* the interface */

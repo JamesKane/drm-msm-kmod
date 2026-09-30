@@ -41,7 +41,10 @@
  * only its hotplug events interrupt.  A DP-to-HDMI bridge keeps hotplug high
  * while it is there and signals its monitor coming and going with IRQ_HPD
  * pulses and its DPCD sink count, so the monitor is connected when both say
- * so.
+ * so.  When it comes back the link is trained again, at the rate and lane
+ * count the firmware chose, as Linux's msm does on every plug: a bridge may
+ * keep showing the picture without, but then no longer reports the link
+ * locked.
  *
  * The firmware leaves the display's SMMU streams in bypass, so the pipe
  * fetches physical addresses, through 32-bit registers: buffers are
@@ -76,6 +79,7 @@
 #include <drm/drm_connector.h>
 #include <drm/drm_crtc.h>
 #include <drm/display/drm_dp.h>
+#include <drm/display/drm_dp_helper.h>
 #include <drm/drm_drv.h>
 #include <drm/drm_edid.h>
 #include <drm/drm_encoder.h>
@@ -129,6 +133,14 @@
 #define	DP_HPD_INT_ACK		0x208
 #define	DP_HPD_INT_MASK		0x20c
 #define	DP_PHY_AUX_INTR_CLEAR	0x24c
+#define	DP_STATE_CTRL		0x404		/* link block */
+#define	 DP_STATE_SEND_VIDEO	(1u << 7)
+#define	DP_MAINLINK_READY	0x440
+#define	 DP_READY_TRAINING_SHIFT 3
+
+/* The PHY's transmit blocks, each two lanes. */
+#define	PHY_TX_EMP_POST1_LVL	0x004
+#define	PHY_TX_DRV_LVL		0x014
 #define	DP_PHY_AUX_INTR_STATUS	0x2bc
 /*
  * DP_INTR_STATUS has a status bit per event, and above each its
@@ -302,6 +314,256 @@ msmfb_aux(struct msmfb *fb, bool i2c, bool read, u32 addr, u8 *buf,
 	return (0);
 }
 
+/* A native AUX write of one byte, for the DPCD. */
+static int
+msmfb_dpcd_writeb(struct msmfb *fb, u32 addr, u8 val)
+{
+	return (msmfb_aux(fb, false, false, addr, &val, 1));
+}
+
+/*
+ * The PHY's drive level and pre-emphasis for each voltage swing and
+ * pre-emphasis level, from Linux's phy-qcom-edp.c (DP, not eDP); 0xff where
+ * swing and pre-emphasis together exceed level 3.
+ */
+static const u8 msmfb_swing_hbr_rbr[4][4] = {
+	{ 0x07, 0x0f, 0x16, 0x1f },
+	{ 0x11, 0x1e, 0x1f, 0xff },
+	{ 0x16, 0x1f, 0xff, 0xff },
+	{ 0x1f, 0xff, 0xff, 0xff }
+};
+static const u8 msmfb_emph_hbr_rbr[4][4] = {
+	{ 0x00, 0x0e, 0x15, 0x1a },
+	{ 0x00, 0x0e, 0x15, 0xff },
+	{ 0x00, 0x0e, 0xff, 0xff },
+	{ 0x04, 0xff, 0xff, 0xff }
+};
+static const u8 msmfb_swing_hbr2_hbr3[4][4] = {
+	{ 0x02, 0x12, 0x16, 0x1a },
+	{ 0x09, 0x19, 0x1f, 0xff },
+	{ 0x10, 0x1f, 0xff, 0xff },
+	{ 0x1f, 0xff, 0xff, 0xff }
+};
+static const u8 msmfb_emph_hbr2_hbr3[4][4] = {
+	{ 0x00, 0x0c, 0x15, 0x1b },
+	{ 0x02, 0x0e, 0x16, 0xff },
+	{ 0x02, 0x11, 0xff, 0xff },
+	{ 0x04, 0xff, 0xff, 0xff }
+};
+
+struct msmfb_train {
+	u8	bw;		/* DPCD LINK_BW_SET */
+	u8	lanes;
+	u8	v, p;		/* voltage swing and pre-emphasis levels */
+	u8	dpcd[DP_RECEIVER_CAP_SIZE];
+};
+
+/* Drive the lanes at levels v and p, and tell the sink. */
+static int
+msmfb_train_levels(struct msmfb *fb, struct msmfb_train *t)
+{
+	const struct msm_fbsd_disp *d = fb->disp;
+	u8 set[4], swing, emph;
+	int i;
+
+	if (t->bw <= DP_LINK_BW_2_7) {
+		swing = msmfb_swing_hbr_rbr[t->v][t->p];
+		emph = msmfb_emph_hbr_rbr[t->v][t->p];
+	} else {
+		swing = msmfb_swing_hbr2_hbr3[t->v][t->p];
+		emph = msmfb_emph_hbr2_hbr3[t->v][t->p];
+	}
+	if (swing == 0xff || emph == 0xff)
+		return (-EINVAL);
+	for (i = 0; i < 2; i++) {
+		writel(swing, fb->mdss + d->dp_phy_tx[i] + PHY_TX_DRV_LVL);
+		writel(emph, fb->mdss + d->dp_phy_tx[i] + PHY_TX_EMP_POST1_LVL);
+	}
+	for (i = 0; i < t->lanes; i++)
+		set[i] = t->v | (t->p << DP_TRAIN_PRE_EMPHASIS_SHIFT) |
+		    (t->v == 3 ? DP_TRAIN_MAX_SWING_REACHED : 0) |
+		    (t->p == 3 ? DP_TRAIN_MAX_PRE_EMPHASIS_REACHED : 0);
+	return (msmfb_aux(fb, false, false, DP_TRAINING_LANE0_SET, set,
+	    t->lanes));
+}
+
+/* The levels the sink asks for, the highest of any lane's, within level 3. */
+static void
+msmfb_train_adjust(struct msmfb_train *t, const u8 *status)
+{
+	int i;
+
+	t->v = t->p = 0;
+	for (i = 0; i < t->lanes; i++) {
+		t->v = max(t->v, drm_dp_get_adjust_request_voltage(status, i) >>
+		    DP_TRAIN_VOLTAGE_SWING_SHIFT);
+		t->p = max(t->p,
+		    drm_dp_get_adjust_request_pre_emphasis(status, i) >>
+		    DP_TRAIN_PRE_EMPHASIS_SHIFT);
+	}
+	if (t->v + t->p > 3)
+		t->p = 3 - t->v;
+}
+
+/* Have the controller send training pattern n (0 for none). */
+static int
+msmfb_train_pattern(struct msmfb *fb, int n)
+{
+	int us;
+
+	msmfb_dp_write(fb, DP_STATE_CTRL, 0);
+	if (n == 0)
+		return (0);
+	msmfb_dp_write(fb, DP_STATE_CTRL, 1u << (n - 1));
+	for (us = 0; us < 10000; us += 10) {
+		if ((msmfb_dp_read(fb, DP_MAINLINK_READY) &
+		    ((1u << (n - 1)) << DP_READY_TRAINING_SHIFT)) != 0)
+			return (0);
+		DELAY(10);
+	}
+	return (-ETIMEDOUT);
+}
+
+/*
+ * The waits before reading the link status, as drm_dp_link_train_*_delay()
+ * work them out (which need a drm_dp_aux); intervals over 4 count as 4.
+ */
+static void
+msmfb_train_delay(const struct msmfb_train *t, bool eq)
+{
+	u_int rd, us;
+
+	rd = min(t->dpcd[DP_TRAINING_AUX_RD_INTERVAL] &
+	    DP_TRAINING_AUX_RD_MASK, 4u);
+	if (!eq && t->dpcd[DP_DPCD_REV] >= DP_DPCD_REV_14)
+		us = 100;
+	else if (rd == 0)
+		us = eq ? 400 : 100;
+	else
+		us = rd * 4000;
+	usleep_range(us, us * 2);
+}
+
+static int
+msmfb_train_status(struct msmfb *fb, u8 *status)
+{
+	/* DP_LINK_STATUS_SIZE bytes from DP_LANE0_1_STATUS, in AUX-sized reads. */
+	return (msmfb_aux(fb, false, true, DP_LANE0_1_STATUS, status,
+	    DP_LINK_STATUS_SIZE));
+}
+
+/*
+ * Train the link, as msm's dp_ctrl.c does: clock recovery with pattern 1,
+ * then channel equalization with the best pattern the sink has.
+ */
+static int
+msmfb_link_train(struct msmfb *fb)
+{
+	struct msmfb_train t;
+	u8 status[DP_LINK_STATUS_SIZE], cfg[2], pattern;
+	int error, tries, old_v, n;
+
+	memset(&t, 0, sizeof(t));
+	error = msmfb_aux(fb, false, true, DP_DPCD_REV, t.dpcd, 15);
+	if (error != 0)
+		return (error);
+	/* The rate and lanes the firmware trained at. */
+	error = msmfb_aux(fb, false, true, DP_LINK_BW_SET, cfg, 2);
+	if (error != 0)
+		return (error);
+	t.bw = cfg[0];
+	t.lanes = cfg[1] & DP_LANE_COUNT_MASK;
+	if (t.lanes == 0 || t.lanes > 4 || t.bw == 0)
+		return (-EINVAL);
+
+	/* Link configuration, as msm_dp_aux_link_configure() and after. */
+	cfg[1] = t.lanes | DP_LANE_COUNT_ENHANCED_FRAME_EN;
+	error = msmfb_aux(fb, false, false, DP_LINK_BW_SET, cfg, 2);
+	if (error != 0)
+		return (error);
+	cfg[0] = drm_dp_max_downspread(t.dpcd) ? DP_SPREAD_AMP_0_5 : 0;
+	cfg[1] = DP_SET_ANSI_8B10B;
+	error = msmfb_aux(fb, false, false, DP_DOWNSPREAD_CTRL, cfg, 2);
+	if (error != 0)
+		return (error);
+
+	/* Clock recovery. */
+	error = msmfb_train_pattern(fb, 1);
+	if (error == 0)
+		error = msmfb_dpcd_writeb(fb, DP_TRAINING_PATTERN_SET,
+		    DP_TRAINING_PATTERN_1 | DP_LINK_SCRAMBLING_DISABLE);
+	if (error == 0)
+		error = msmfb_train_levels(fb, &t);
+	for (tries = 0, old_v = t.v; error == 0; tries++) {
+		msmfb_train_delay(&t, false);
+		if ((error = msmfb_train_status(fb, status)) != 0)
+			break;
+		if (drm_dp_clock_recovery_ok(status, t.lanes))
+			break;
+		if (t.v >= 3 || tries >= 4) {
+			error = -ETIMEDOUT;
+			break;
+		}
+		msmfb_train_adjust(&t, status);
+		if (t.v != old_v) {
+			tries = 0;
+			old_v = t.v;
+		}
+		error = msmfb_train_levels(fb, &t);
+	}
+	if (error != 0) {
+		dev_warn(fb->drm.dev, "link training: clock recovery failed: "
+		    "%d\n", error);
+		goto out;
+	}
+
+	/* Channel equalization. */
+	if (drm_dp_tps4_supported(t.dpcd)) {
+		pattern = DP_TRAINING_PATTERN_4;
+		n = 4;
+	} else if (drm_dp_tps3_supported(t.dpcd)) {
+		pattern = DP_TRAINING_PATTERN_3;
+		n = 3;
+	} else {
+		pattern = DP_TRAINING_PATTERN_2;
+		n = 2;
+	}
+	error = msmfb_train_pattern(fb, n);
+	if (error == 0)
+		error = msmfb_dpcd_writeb(fb, DP_TRAINING_PATTERN_SET,
+		    pattern | (pattern != DP_TRAINING_PATTERN_4 ?
+		    DP_LINK_SCRAMBLING_DISABLE : 0));
+	for (tries = 0; error == 0; tries++) {
+		msmfb_train_delay(&t, true);
+		if ((error = msmfb_train_status(fb, status)) != 0)
+			break;
+		if (drm_dp_channel_eq_ok(status, t.lanes))
+			break;
+		if (tries >= 5) {
+			error = -ETIMEDOUT;
+			break;
+		}
+		msmfb_train_adjust(&t, status);
+		error = msmfb_train_levels(fb, &t);
+	}
+	if (error != 0)
+		dev_warn(fb->drm.dev, "link training: equalization failed: "
+		    "%d\n", error);
+
+out:
+	/* Back to the video, trained or not. */
+	(void)msmfb_train_pattern(fb, 0);
+	(void)msmfb_dpcd_writeb(fb, DP_TRAINING_PATTERN_SET,
+	    DP_TRAINING_PATTERN_DISABLE);
+	msmfb_train_delay(&t, true);
+	msmfb_dp_write(fb, DP_STATE_CTRL, DP_STATE_SEND_VIDEO);
+	if (error == 0)
+		dev_info(fb->drm.dev, "link trained: %d lanes at %d.%02d Gb/s, "
+		    "swing %d, pre-emphasis %d\n", t.lanes, t.bw * 27 / 100,
+		    t.bw * 27 % 100, t.v, t.p);
+	return (error);
+}
+
 /* The monitor's EDID, read through the sink's I2C bus, or NULL. */
 static const struct drm_edid *
 msmfb_read_edid(struct msmfb *fb)
@@ -402,6 +664,24 @@ msmfb_update_sink(struct msmfb *fb)
 	return (changed);
 }
 
+/*
+ * Whether the sink holds the link: the lanes locked and aligned.  A bridge
+ * whose monitor comes back relocks within moments, so look a little later.
+ */
+static void
+msmfb_check_link(struct msmfb *fb)
+{
+	u8 st[3];
+
+	msleep(300);
+	if (msmfb_aux(fb, false, true, DP_LANE0_1_STATUS, st, sizeof(st)) != 0)
+		return;
+	dev_info(fb->drm.dev, "link %s: lanes %#04x %#04x, align %#x\n",
+	    st[0] == 0x77 && st[1] == 0x77 &&
+	    (st[2] & DP_INTERLANE_ALIGN_DONE) != 0 ? "locked" : "NOT locked",
+	    st[0], st[1], st[2]);
+}
+
 static void
 msmfb_hotplug_work(struct work_struct *work)
 {
@@ -410,6 +690,10 @@ msmfb_hotplug_work(struct work_struct *work)
 
 	mutex_lock(&fb->sink_lock);
 	changed = msmfb_update_sink(fb);
+	if (fb->connected) {
+		(void)msmfb_link_train(fb);
+		msmfb_check_link(fb);
+	}
 	mutex_unlock(&fb->sink_lock);
 	dev_info(fb->drm.dev, "hotplug: monitor %s\n",
 	    fb->connected ? "connected" : "disconnected");
