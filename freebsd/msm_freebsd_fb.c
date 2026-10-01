@@ -65,6 +65,8 @@
 #include <sys/param.h>
 #include <sys/systm.h>
 #include <sys/fbio.h>
+#include <sys/sysctl.h>
+#include <sys/vmem.h>
 
 #include <vm/vm.h>
 #include <vm/pmap.h>
@@ -260,6 +262,9 @@ struct msmfb {
 	struct drm_display_mode		fw_mode;
 	struct drm_display_mode		hw_mode;	/* what the timing is */
 	bool				output_off;	/* by DPMS */
+	vm_page_t			pool;		/* scan-out pool, or NULL */
+	u_long				pool_npages;
+	vmem_t				*pool_arena;	/* its free pages */
 	struct drm_plane		plane;
 	struct drm_crtc			crtc;
 	struct drm_encoder		encoder;
@@ -274,6 +279,7 @@ struct msmfb {
 /* A dumb buffer: physically contiguous pages below 4 GB. */
 struct msmfb_bo {
 	struct drm_gem_object	base;
+	bool			pooled;		/* from the scan-out pool */
 	struct page		*page;
 	struct page		**pages;	/* each of them, for PRIME and vmap */
 	u_int			npages;
@@ -1234,9 +1240,13 @@ msmfb_bo_free(struct drm_gem_object *obj)
 #else
 			bo->pages[i]->oflags |= VPO_UNMANAGED;
 #endif
-		for (i = 0; i < bo->npages; i++)
-			if (vm_page_unwire_noq(bo->pages[i]))
-				vm_page_free(bo->pages[i]);
+		if (bo->pooled)
+			vmem_free(to_msmfb(obj->dev)->pool_arena,
+			    VM_PAGE_TO_PHYS(bo->page), ptoa(bo->npages));
+		else
+			for (i = 0; i < bo->npages; i++)
+				if (vm_page_unwire_noq(bo->pages[i]))
+					vm_page_free(bo->pages[i]);
 	}
 	kvfree(bo->pages);
 	drm_gem_object_release(obj);
@@ -1333,10 +1343,62 @@ msmfb_alloc_contig(u_long npages)
 	return (NULL);
 }
 
+/*
+ * The scan-out pool: contiguous memory below 4 GB, taken when the display
+ * attaches, early in boot, while there is still plenty.  Later on, wired
+ * kernel memory can leave no run long enough for a framebuffer, and a
+ * compositor started then gets none.  Buffers come from the pool first.
+ */
+static u_int msmfb_pool_mb = 64;
+SYSCTL_UINT(_hw_msm, OID_AUTO, fb_pool_mb, CTLFLAG_RDTUN, &msmfb_pool_mb, 0,
+    "Memory (MB) below 4 GB the display reserves for scan-out buffers");
+
+/* When the device goes, after its last buffer. */
+static void
+msmfb_pool_fini(struct drm_device *drm, void *arg)
+{
+	struct msmfb *fb = arg;
+	u_long i;
+
+	if (fb->pool == NULL)
+		return;
+	vmem_destroy(fb->pool_arena);
+	for (i = 0; i < fb->pool_npages; i++)
+		if (vm_page_unwire_noq(&fb->pool[i]))
+			vm_page_free(&fb->pool[i]);
+	fb->pool = NULL;
+	fb->pool_arena = NULL;
+}
+
+static void
+msmfb_pool_init(struct msmfb *fb)
+{
+	u_long npages;
+
+	npages = (u_long)msmfb_pool_mb << (20 - PAGE_SHIFT);
+	if (npages == 0)
+		return;
+	fb->pool = msmfb_alloc_contig(npages);
+	if (fb->pool == NULL) {
+		dev_warn(fb->drm.dev, "no %u MB below 4 GB for scan-out "
+		    "buffers\n", msmfb_pool_mb);
+		return;
+	}
+	fb->pool_npages = npages;
+	fb->pool_arena = vmem_create("msmfb", VM_PAGE_TO_PHYS(fb->pool),
+	    ptoa(npages), PAGE_SIZE, 0, M_WAITOK);
+	if (drmm_add_action_or_reset(&fb->drm, msmfb_pool_fini, fb) != 0)
+		return;
+	dev_info(fb->drm.dev, "%u MB at %#jx for scan-out buffers\n",
+	    msmfb_pool_mb, (uintmax_t)VM_PAGE_TO_PHYS(fb->pool));
+}
+
 static struct msmfb_bo *
 msmfb_bo_create(struct drm_device *drm, size_t size)
 {
+	struct msmfb *fb = to_msmfb(drm);
 	struct msmfb_bo *bo;
+	vmem_addr_t addr;
 	u_int i;
 
 	size = round_up(size, PAGE_SIZE);
@@ -1352,7 +1414,12 @@ msmfb_bo_create(struct drm_device *drm, size_t size)
 	bo->pages = kvcalloc(bo->npages, sizeof(*bo->pages), GFP_KERNEL);
 	if (bo->pages == NULL)
 		goto fail;
-	bo->page = msmfb_alloc_contig(bo->npages);
+	if (fb->pool_arena != NULL && vmem_alloc(fb->pool_arena, size,
+	    M_BESTFIT | M_NOWAIT, &addr) == 0) {
+		bo->page = &fb->pool[atop(addr - VM_PAGE_TO_PHYS(fb->pool))];
+		bo->pooled = true;
+	} else
+		bo->page = msmfb_alloc_contig(bo->npages);
 	if (bo->page == NULL)
 		goto fail;
 	for (i = 0; i < bo->npages; i++) {
@@ -1376,6 +1443,9 @@ msmfb_bo_create(struct drm_device *drm, size_t size)
 	    pgprot_writecombine(PAGE_KERNEL));
 	if (bo->vaddr == NULL)
 		goto fail;
+	/* The pool's pages come back with what the last buffer held. */
+	if (bo->pooled)
+		memset(bo->vaddr, 0, size);
 	return (bo);
 
 fail:
@@ -1923,6 +1993,7 @@ msmfb_probe(struct platform_device *pdev)
 	}
 	msmfb_timing_mode(fb, &fb->fw_timing, &fb->fw_mode);
 	drm_mode_copy(&fb->hw_mode, &fb->fw_mode);
+	msmfb_pool_init(fb);
 	error = msmfb_kms_init(fb);
 	if (error != 0) {
 		drm_edid_free(fb->edid);
