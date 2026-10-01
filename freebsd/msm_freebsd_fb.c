@@ -70,6 +70,9 @@
 #include <vm/pmap.h>
 #include <vm/vm_object.h>
 #include <vm/vm_page.h>
+#include <vm/vm_pageout.h>
+
+#include <machine/bus.h>
 
 #include <dev/vt/vt.h>
 
@@ -268,11 +271,10 @@ struct msmfb {
 
 #define	to_msmfb(d)	container_of(d, struct msmfb, drm)
 
-/* A dumb buffer: 2^order physically contiguous pages below 4 GB. */
+/* A dumb buffer: physically contiguous pages below 4 GB. */
 struct msmfb_bo {
 	struct drm_gem_object	base;
 	struct page		*page;
-	u_int			order;
 	struct page		**pages;	/* each of them, for PRIME and vmap */
 	u_int			npages;
 	void			*vaddr;		/* write-combining */
@@ -1232,7 +1234,9 @@ msmfb_bo_free(struct drm_gem_object *obj)
 #else
 			bo->pages[i]->oflags |= VPO_UNMANAGED;
 #endif
-		__free_pages(bo->page, bo->order);
+		for (i = 0; i < bo->npages; i++)
+			if (vm_page_unwire_noq(bo->pages[i]))
+				vm_page_free(bo->pages[i]);
 	}
 	kvfree(bo->pages);
 	drm_gem_object_release(obj);
@@ -1304,6 +1308,31 @@ static const struct drm_gem_object_funcs msmfb_bo_funcs = {
 	.vm_ops = &msmfb_vm_ops,
 };
 
+/*
+ * Physically contiguous, zeroed pages below 4 GB, for the pipe's 32-bit
+ * addresses: exactly as many as asked, where alloc_pages() would round up
+ * to a power of two, and making room for them by reclaiming, as
+ * kmem_alloc_contig() does, when memory has fragmented.
+ */
+static vm_page_t
+msmfb_alloc_contig(u_long npages)
+{
+	vm_page_t m;
+	int tries;
+
+	for (tries = 0; tries < 4; tries++) {
+		m = vm_page_alloc_noobj_contig(VM_ALLOC_WIRED | VM_ALLOC_ZERO,
+		    npages, 0, BUS_SPACE_MAXADDR_32BIT, PAGE_SIZE, 0,
+		    VM_MEMATTR_DEFAULT);
+		if (m != NULL)
+			return (m);
+		if (vm_page_reclaim_contig(VM_ALLOC_WIRED, npages, 0,
+		    BUS_SPACE_MAXADDR_32BIT, PAGE_SIZE, 0) == ENOMEM)
+			vm_wait(NULL);
+	}
+	return (NULL);
+}
+
 static struct msmfb_bo *
 msmfb_bo_create(struct drm_device *drm, size_t size)
 {
@@ -1319,12 +1348,11 @@ msmfb_bo_create(struct drm_device *drm, size_t size)
 	bo->base.funcs = &msmfb_bo_funcs;
 	drm_gem_private_object_init(drm, &bo->base, size);
 
-	bo->order = get_order(size);
 	bo->npages = size >> PAGE_SHIFT;
 	bo->pages = kvcalloc(bo->npages, sizeof(*bo->pages), GFP_KERNEL);
 	if (bo->pages == NULL)
 		goto fail;
-	bo->page = alloc_pages(GFP_KERNEL | GFP_DMA32 | __GFP_ZERO, bo->order);
+	bo->page = msmfb_alloc_contig(bo->npages);
 	if (bo->page == NULL)
 		goto fail;
 	for (i = 0; i < bo->npages; i++) {
