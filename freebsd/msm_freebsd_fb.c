@@ -2022,6 +2022,12 @@ msmfb_probe(struct platform_device *pdev)
 	error = devm_request_irq(&pdev->dev, irq, msmfb_irq, 0, "msmfb", fb);
 	if (error != 0)
 		return (error);
+	/*
+	 * The vsync paces frames: give it to CPU 0, which deep idle keeps
+	 * awake, rather than a CPU that may need most of a millisecond to
+	 * power up first (see msm_gpu.c).
+	 */
+	(void)bind_irq_to_cpu(irq, 0);
 	platform_set_drvdata(pdev, fb);
 	error = drm_dev_register(&fb->drm, 0);
 	if (error != 0)

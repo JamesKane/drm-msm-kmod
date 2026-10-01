@@ -910,6 +910,15 @@ int msm_gpu_init(struct drm_device *drm, struct platform_device *pdev,
 		DRM_DEV_ERROR(drm->dev, "failed to request IRQ%u: %d\n", gpu->irq, ret);
 		goto fail;
 	}
+#ifdef __FreeBSD__
+	/*
+	 * FreeBSD spreads interrupts over the CPUs, where Linux leaves them
+	 * on the boot CPU.  Under deep idle the others power down, and
+	 * waking one costs a frame's completion most of a millisecond; CPU 0
+	 * stays awake for the event timer, so the GPU's interrupt goes there.
+	 */
+	(void)bind_irq_to_cpu(gpu->irq, 0);
+#endif
 
 	ret = get_clocks(pdev, gpu);
 	if (ret)
