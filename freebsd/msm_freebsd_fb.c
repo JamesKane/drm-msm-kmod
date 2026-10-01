@@ -1632,9 +1632,18 @@ msmfb_crtc_atomic_disable(struct drm_crtc *crtc, struct drm_atomic_state *state)
 		crtc->state->event = NULL;
 	}
 	spin_unlock_irq(&crtc->dev->event_lock);
-	/* Off, rather than on in another mode. */
-	if (!new->active)
-		msmfb_output(fb, false);
+	/*
+	 * Off, rather than on in another mode.  Removing a client's last
+	 * framebuffer also turns the CRTC off, and with seatd that comes after
+	 * the client has dropped master, when nothing would turn the output
+	 * on for the console again: so with no master, show the console.
+	 */
+	if (!new->active) {
+		if (READ_ONCE(fb->drm.master) == NULL)
+			msmfb_show_console(fb);
+		else
+			msmfb_output(fb, false);
+	}
 }
 
 static const struct drm_crtc_helper_funcs msmfb_crtc_helper_funcs = {
