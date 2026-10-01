@@ -1642,8 +1642,9 @@ msmfb_crtc_atomic_check(struct drm_crtc *crtc, struct drm_atomic_state *state)
 
 /*
  * A new mode goes on before the plane shows a buffer of its size.  It goes
- * on here, not in atomic_enable, for the firmware's mode that the console
- * gets back behind the atomic state's back.
+ * on here as well as in atomic_enable, for a mode change on a CRTC that
+ * stays on, and for the firmware's mode that the console gets back behind
+ * the atomic state's back.
  */
 static void
 msmfb_crtc_atomic_begin(struct drm_crtc *crtc, struct drm_atomic_state *state)
@@ -1676,10 +1677,15 @@ msmfb_crtc_atomic_flush(struct drm_crtc *crtc, struct drm_atomic_state *state)
 	spin_unlock_irq(&crtc->dev->event_lock);
 }
 
+/* The mode first, so that turning the output on trains the link once. */
 static void
 msmfb_crtc_atomic_enable(struct drm_crtc *crtc, struct drm_atomic_state *state)
 {
-	msmfb_output(container_of(crtc, struct msmfb, crtc), true);
+	struct msmfb *fb = container_of(crtc, struct msmfb, crtc);
+
+	msmfb_set_mode(fb,
+	    &drm_atomic_get_new_crtc_state(state, crtc)->adjusted_mode);
+	msmfb_output(fb, true);
 	drm_crtc_vblank_on(crtc);
 }
 
@@ -1841,6 +1847,16 @@ static const struct drm_mode_config_funcs msmfb_mode_config_funcs = {
 };
 
 /*
+ * Enable the CRTC before its planes, not after as the default commit tail
+ * does: the flip that turns it on queues its event in atomic_flush, which
+ * needs vblank on to wait for a vsync.  Otherwise the event goes out at
+ * once, stamped with the last vblank before the CRTC went off, seconds old.
+ */
+static const struct drm_mode_config_helper_funcs msmfb_mode_config_helpers = {
+	.atomic_commit_tail = drm_atomic_helper_commit_tail_rpm,
+};
+
+/*
  * vt(4) keeps drawing text in KD_GRAPHICS mode, into the firmware
  * framebuffer.  Keep it off while a client is DRM master, as sysfbdrm does;
  * vt redraws everything when it gets the display back.
@@ -1906,6 +1922,7 @@ msmfb_kms_init(struct msmfb *fb)
 	drm->mode_config.max_height = MSMFB_MAX_WIDTH;
 	drm->mode_config.preferred_depth = 24;
 	drm->mode_config.funcs = &msmfb_mode_config_funcs;
+	drm->mode_config.helper_private = &msmfb_mode_config_helpers;
 
 	error = drm_universal_plane_init(drm, &fb->plane, 0, &msmfb_plane_funcs,
 	    msmfb_formats, nitems(msmfb_formats), msmfb_modifiers,
